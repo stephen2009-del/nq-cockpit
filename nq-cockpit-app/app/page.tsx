@@ -485,11 +485,11 @@ function PreMarketTab({
   const move = parseFloat(form.estimatedMove);
   const valid = !isNaN(qqq) && !isNaN(mult) && !isNaN(move);
   const nqPrice = valid ? qqq * mult : null;
-  const nqHigh = valid ? nqPrice! + move : null;
-  const nqLow = valid ? nqPrice! - move : null;
-  const qqqMove = valid ? move / mult : null;
-  const qqqHigh = valid ? qqq + qqqMove! : null;
-  const qqqLow = valid ? qqq - qqqMove! : null;
+  const nqMove = valid ? move * mult : null;
+  const nqHigh = valid ? nqPrice! + nqMove! : null;
+  const nqLow = valid ? nqPrice! - nqMove! : null;
+  const qqqHigh = valid ? qqq + move : null;
+  const qqqLow = valid ? qqq - move : null;
 
   const [ladderRange, setLadderRange] = useState("20");
   const [ladderStep, setLadderStep] = useState("1");
@@ -518,8 +518,8 @@ function PreMarketTab({
           <div className="field"><label>NQ/QQQ Multiplier</label>
             <input type="number" step="0.01" value={form.multiplier} onChange={(e) => setForm({ ...form, multiplier: e.target.value })} placeholder="e.g. 41.36" />
           </div>
-          <div className="field"><label>Estimated Move (NQ points)</label>
-            <input type="number" step="1" value={form.estimatedMove} onChange={(e) => setForm({ ...form, estimatedMove: e.target.value })} placeholder="e.g. 180" />
+          <div className="field"><label>Estimated Move (QQQ points)</label>
+            <input type="number" step="0.5" value={form.estimatedMove} onChange={(e) => setForm({ ...form, estimatedMove: e.target.value })} placeholder="e.g. 10" />
           </div>
         </div>
         <div className="field">
@@ -580,7 +580,7 @@ function PreMarketTab({
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table>
-              <thead><tr><th>Date</th><th>QQQ</th><th>Multiplier</th><th>NQ (calc)</th><th>Est. Move</th><th>OI Notes</th></tr></thead>
+              <thead><tr><th>Date</th><th>QQQ</th><th>Multiplier</th><th>NQ (calc)</th><th>Est. Move (QQQ)</th><th>OI Notes</th></tr></thead>
               <tbody>
                 {history.map((p) => (
                   <tr key={p.id}>
