@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
+import { getTradingWindowStatus } from "@/lib/tradingWindow";
 
 type Rule = { id: number; text: string; order: number };
 type Trade = {
@@ -20,7 +21,16 @@ type Trade = {
   disciplined: boolean;
   checklistSnapshot: { rule: string; passed: boolean }[];
 };
-type Settings = { id: number; dailyLossLimit: number; contract: string; multiplier: number };
+type Settings = {
+  id: number;
+  dailyLossLimit: number;
+  contract: string;
+  multiplier: number;
+  tradingWindowStart: string;
+  tradingWindowEnd: string;
+  cutoffMinutesBeforeClose: number;
+  tradovateEnv: string;
+};
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
 type IntradayCheckT = { id: number; date: string; qqqPrice: number; nqPrice: number };
@@ -90,9 +100,12 @@ function downloadTradesCSV(trades: Trade[]) {
 export default function Page() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
-  const [settings, setSettings] = useState<Settings>({ id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20 });
+  const [settings, setSettings] = useState<Settings>({
+    id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, tradovateEnv: "demo",
+  });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"premarket" | "intraday" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
+  const [tab, setTab] = useState<"premarket" | "intraday" | "tradeticket" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
   const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
   const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "", openInterestNotes: "" });
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
@@ -327,14 +340,16 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["premarket", "intraday", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
+        {(["premarket", "intraday", "tradeticket", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t}
+            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t === "tradeticket" ? "Trade Ticket" : t}
           </button>
         ))}
       </div>
 
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
+
+      {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
 
       {tab === "intraday" && (
         <IntradayTab
@@ -862,6 +877,182 @@ function IntradayTab({
   );
 }
 
+type OrderLog = {
+  id: number;
+  date: string;
+  env: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  orderType: string;
+  limitPrice: number | null;
+  status: string;
+  blockedReason: string | null;
+  tradovateOrderId: string | null;
+};
+
+function TradeTicketTab({ settings }: { settings: Settings }) {
+  const [windowStatus, setWindowStatus] = useState(() => getTradingWindowStatus(settings));
+  const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
+  const [logs, setLogs] = useState<OrderLog[]>([]);
+  const [form, setForm] = useState({ accountId: "", symbol: "", action: "Buy", qty: "1", orderType: "Market", price: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => setWindowStatus(getTradingWindowStatus(settings)), 15000);
+    return () => clearInterval(interval);
+  }, [settings]);
+
+  useEffect(() => {
+    setWindowStatus(getTradingWindowStatus(settings));
+    fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
+      .then((r) => r.json())
+      .then((d) => setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error }))
+      .catch((e) => setConnStatus({ connected: false, accounts: null, error: String(e) }));
+    fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
+  }, [settings.tradovateEnv]);
+
+  async function submitOrder() {
+    if (!form.accountId || !form.symbol || !form.qty) {
+      alert("Fill in account, symbol, and quantity.");
+      return;
+    }
+    setSubmitting(true);
+    setResult(null);
+    try {
+      const res = await fetch("/api/tradovate/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          env: settings.tradovateEnv,
+          accountId: form.accountId,
+          symbol: form.symbol,
+          action: form.action,
+          orderQty: form.qty,
+          orderType: form.orderType,
+          price: form.orderType === "Limit" ? form.price : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (res.status === 403 && data.blocked) {
+        setResult({ type: "blocked", message: data.reason });
+      } else if (!res.ok) {
+        setResult({ type: "error", message: JSON.stringify(data.error) });
+      } else {
+        setResult({ type: "success", message: `Order submitted (${settings.tradovateEnv}). Tradovate order ID: ${data.result?.orderId ?? "pending"}` });
+      }
+      fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
+    } catch (err: any) {
+      setResult({ type: "error", message: err.message || String(err) });
+    }
+    setSubmitting(false);
+  }
+
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
+        <div className="panel-desc">
+          Orders placed here go through Tradovate's API and are blocked automatically outside your Trading Window Guard settings.
+          {settings.tradovateEnv === "live" && (
+            <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
+          )}
+        </div>
+
+        <div className={`status-banner ${windowStatus.allowed ? "status-clear" : "status-warn"}`} style={!windowStatus.allowed ? { borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" } : undefined}>
+          {windowStatus.allowed ? "✓ " : "⛔ "}{windowStatus.reason} (Current ET time: {windowStatus.etLabel})
+        </div>
+
+        <div className="status-banner" style={{ marginTop: 8, background: connStatus?.connected ? "rgba(63,208,201,0.1)" : "rgba(245,166,35,0.1)", borderColor: connStatus?.connected ? "var(--cyan-dim)" : "var(--amber-dim)", color: connStatus?.connected ? "var(--cyan)" : "var(--amber)" }}>
+          {connStatus === null ? "Checking Tradovate connection…" : connStatus.connected ? `✓ Connected to Tradovate (${settings.tradovateEnv})` : `⚠ Not connected: ${JSON.stringify(connStatus.error)}`}
+        </div>
+
+        <div className="grid3" style={{ marginTop: 16 }}>
+          <div className="field"><label>Account</label>
+            <select value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
+              <option value="">Select account…</option>
+              {(connStatus?.accounts || []).map((a: any) => (
+                <option key={a.id} value={a.id}>{a.name || a.id}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field"><label>Symbol</label>
+            <input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} placeholder="e.g. NQZ5 (exact contract)" />
+          </div>
+          <div className="field"><label>Side</label>
+            <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
+              <option value="Buy">Buy</option>
+              <option value="Sell">Sell</option>
+            </select>
+          </div>
+        </div>
+        <div className="grid3">
+          <div className="field"><label>Quantity</label>
+            <input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} />
+          </div>
+          <div className="field"><label>Order Type</label>
+            <select value={form.orderType} onChange={(e) => setForm({ ...form, orderType: e.target.value })}>
+              <option value="Market">Market</option>
+              <option value="Limit">Limit</option>
+            </select>
+          </div>
+          {form.orderType === "Limit" && (
+            <div className="field"><label>Limit Price</label>
+              <input type="number" step="0.25" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} />
+            </div>
+          )}
+        </div>
+
+        <button className="btn primary" onClick={submitOrder} disabled={submitting || !windowStatus.allowed}>
+          {submitting ? "Submitting…" : !windowStatus.allowed ? "Blocked — outside trading window" : "Submit Order"}
+        </button>
+
+        {result && (
+          <div
+            className="status-banner"
+            style={{
+              marginTop: 12,
+              borderColor: result.type === "success" ? "var(--cyan-dim)" : "var(--red)",
+              color: result.type === "success" ? "var(--cyan)" : "var(--red)",
+              background: result.type === "success" ? "rgba(63,208,201,0.1)" : "rgba(229,72,77,0.1)",
+            }}
+          >
+            {result.message}
+          </div>
+        )}
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Order Log</div>
+        {logs.length === 0 ? (
+          <div className="empty-state">No orders submitted yet.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th>Detail</th></tr></thead>
+              <tbody>
+                {logs.map((l) => (
+                  <tr key={l.id}>
+                    <td>{new Date(l.date).toLocaleString()}</td>
+                    <td>{l.env}</td>
+                    <td>{l.symbol}</td>
+                    <td><span className={`tag ${l.side === "Buy" ? "long" : "short"}`}>{l.side.toUpperCase()}</span></td>
+                    <td>{l.qty}</td>
+                    <td>{l.orderType}{l.limitPrice ? ` @ ${l.limitPrice}` : ""}</td>
+                    <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : "flag"}`}>{l.status}</span></td>
+                    <td style={{ maxWidth: 260, whiteSpace: "normal" }}>{l.blockedReason || l.tradovateOrderId || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 function Dashboard({ trades }: { trades: Trade[] }) {
   if (trades.length === 0) {
     return <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>;
@@ -1063,6 +1254,36 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
           </div>
           <div className="field"><label>Point Multiplier ($/pt)</label><input type="number" value={local.multiplier} onChange={(e) => setLocal({ ...local, multiplier: parseFloat(e.target.value) })} /></div>
           <div className="field"><label>Daily Loss Limit ($)</label><input type="number" value={local.dailyLossLimit} onChange={(e) => setLocal({ ...local, dailyLossLimit: parseFloat(e.target.value) })} /></div>
+        </div>
+        <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Trading Window Guard</div>
+        <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window. All times are Eastern (ET), matching CME hours.</div>
+        <div className="grid3">
+          <div className="field"><label>Window Start (ET)</label>
+            <input type="time" value={local.tradingWindowStart} onChange={(e) => setLocal({ ...local, tradingWindowStart: e.target.value })} />
+          </div>
+          <div className="field"><label>Window End (ET)</label>
+            <input type="time" value={local.tradingWindowEnd} onChange={(e) => setLocal({ ...local, tradingWindowEnd: e.target.value })} />
+          </div>
+          <div className="field"><label>Cutoff Before Close (minutes)</label>
+            <input type="number" value={local.cutoffMinutesBeforeClose} onChange={(e) => setLocal({ ...local, cutoffMinutesBeforeClose: parseInt(e.target.value) || 0 })} />
+          </div>
+        </div>
+        <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Tradovate Environment</div>
+        <div className="panel-desc">Which Tradovate environment the Trade Ticket tab connects to. Keep this on Demo until you've fully verified the integration.</div>
+        <div className="field" style={{ maxWidth: 240 }}>
+          <label>Environment</label>
+          <select value={local.tradovateEnv} onChange={(e) => setLocal({ ...local, tradovateEnv: e.target.value })}>
+            <option value="demo">Demo</option>
+            <option value="live">Live</option>
+          </select>
         </div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>

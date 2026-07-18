@@ -32,10 +32,29 @@ model Trade {
 }
 
 model Settings {
-  id             Int    @id @default(1)
-  dailyLossLimit Float  @default(500)
-  contract       String @default("NQ")
-  multiplier     Float  @default(20)
+  id                   Int    @id @default(1)
+  dailyLossLimit       Float  @default(500)
+  contract             String @default("NQ")
+  multiplier           Float  @default(20)
+  tradingWindowStart   String @default("09:30")
+  tradingWindowEnd     String @default("16:00")
+  cutoffMinutesBeforeClose Int @default(65)
+  tradovateEnv         String @default("demo")
+}
+
+model TradovateOrderLog {
+  id             Int      @id @default(autoincrement())
+  date           DateTime @default(now())
+  env            String
+  symbol         String
+  side           String
+  qty            Int
+  orderType      String
+  limitPrice     Float?
+  status         String
+  blockedReason  String?
+  tradovateOrderId String?
+  rawResponse    Json?
 }
 
 model PreMarketPrep {

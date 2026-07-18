@@ -13,19 +13,19 @@ export async function GET() {
 
 export async function PUT(req: NextRequest) {
   const body = await req.json();
+  const data = {
+    dailyLossLimit: parseFloat(body.dailyLossLimit),
+    contract: body.contract,
+    multiplier: parseFloat(body.multiplier),
+    tradingWindowStart: body.tradingWindowStart || "09:30",
+    tradingWindowEnd: body.tradingWindowEnd || "16:00",
+    cutoffMinutesBeforeClose: parseInt(body.cutoffMinutesBeforeClose) || 65,
+    tradovateEnv: body.tradovateEnv === "live" ? "live" : "demo",
+  };
   const settings = await prisma.settings.upsert({
     where: { id: 1 },
-    update: {
-      dailyLossLimit: parseFloat(body.dailyLossLimit),
-      contract: body.contract,
-      multiplier: parseFloat(body.multiplier),
-    },
-    create: {
-      id: 1,
-      dailyLossLimit: parseFloat(body.dailyLossLimit),
-      contract: body.contract,
-      multiplier: parseFloat(body.multiplier),
-    },
+    update: data,
+    create: { id: 1, ...data },
   });
   return NextResponse.json(settings);
 }
