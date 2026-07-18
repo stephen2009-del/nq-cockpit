@@ -2,6 +2,7 @@ export type TradingWindowSettings = {
   tradingWindowStart: string; // "09:30"
   tradingWindowEnd: string; // "16:00"
   cutoffMinutesBeforeClose: number; // 65
+  openingBufferMinutes: number; // 10
 };
 
 function toMinutes(hhmm: string): number {
@@ -37,6 +38,7 @@ export function getTradingWindowStatus(
   const start = toMinutes(settings.tradingWindowStart);
   const end = toMinutes(settings.tradingWindowEnd);
   const cutoff = end - settings.cutoffMinutesBeforeClose;
+  const effectiveStart = start + (settings.openingBufferMinutes || 0);
   const etLabel = minutesToLabel(current);
 
   const etWeekday = new Intl.DateTimeFormat("en-US", {
@@ -51,6 +53,13 @@ export function getTradingWindowStatus(
     return {
       allowed: false,
       reason: `Before your trading window (Globex/overnight session) — opens at ${minutesToLabel(start)} ET.`,
+      etLabel,
+    };
+  }
+  if (current < effectiveStart) {
+    return {
+      allowed: false,
+      reason: `Within the first ${settings.openingBufferMinutes} minutes after the open — trading allowed starting ${minutesToLabel(effectiveStart)} ET.`,
       etLabel,
     };
   }

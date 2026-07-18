@@ -30,6 +30,7 @@ type Settings = {
   tradingWindowStart: string;
   tradingWindowEnd: string;
   cutoffMinutesBeforeClose: number;
+  openingBufferMinutes: number;
   tradovateEnv: string;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
@@ -41,6 +42,17 @@ const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 
 function fmtMoney(n: number) {
   const sign = n < 0 ? "-" : "";
   return sign + "$" + Math.abs(n).toFixed(2);
+}
+
+function addMinutesLabel(hhmm: string, deltaMinutes: number): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  let total = h * 60 + m + deltaMinutes;
+  total = ((total % 1440) + 1440) % 1440;
+  const hh = Math.floor(total / 60);
+  const mm = total % 60;
+  const period = hh >= 12 ? "PM" : "AM";
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${h12}:${String(mm).padStart(2, "0")} ${period}`;
 }
 function escapeHtml(str: string | null | undefined) {
   return str || "";
@@ -103,7 +115,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, tradovateEnv: "demo",
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo",
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -1629,6 +1641,12 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
           <div className="field"><label>Cutoff Before Close (minutes)</label>
             <input type="number" value={local.cutoffMinutesBeforeClose} onChange={(e) => setLocal({ ...local, cutoffMinutesBeforeClose: parseInt(e.target.value) || 0 })} />
           </div>
+          <div className="field"><label>Block First N Minutes After Open</label>
+            <input type="number" value={local.openingBufferMinutes} onChange={(e) => setLocal({ ...local, openingBufferMinutes: parseInt(e.target.value) || 0 })} />
+          </div>
+        </div>
+        <div className="card-sub" style={{ marginBottom: 12 }}>
+          Effective allowed window: {addMinutesLabel(local.tradingWindowStart, local.openingBufferMinutes)} – {addMinutesLabel(local.tradingWindowEnd, -local.cutoffMinutesBeforeClose)} ET
         </div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>

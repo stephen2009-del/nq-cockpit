@@ -39,6 +39,7 @@ model Settings {
   tradingWindowStart   String @default("09:30")
   tradingWindowEnd     String @default("16:00")
   cutoffMinutesBeforeClose Int @default(65)
+  openingBufferMinutes Int    @default(10)
   tradovateEnv         String @default("demo")
 }
 

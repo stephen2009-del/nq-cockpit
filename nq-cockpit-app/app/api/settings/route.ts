@@ -20,6 +20,7 @@ export async function PUT(req: NextRequest) {
     tradingWindowStart: body.tradingWindowStart || "09:30",
     tradingWindowEnd: body.tradingWindowEnd || "16:00",
     cutoffMinutesBeforeClose: parseInt(body.cutoffMinutesBeforeClose) || 65,
+    openingBufferMinutes: parseInt(body.openingBufferMinutes) ?? 10,
     tradovateEnv: body.tradovateEnv === "live" ? "live" : "demo",
   };
   const settings = await prisma.settings.upsert({
