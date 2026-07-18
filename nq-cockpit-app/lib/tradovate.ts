@@ -20,6 +20,10 @@ function baseUrl(env: Env) {
 type TokenCacheEntry = { token: string; expiresAt: number };
 const tokenCache: Partial<Record<Env, TokenCacheEntry>> = {};
 
+type FailureCacheEntry = { error: string; retryAfter: number };
+const failureCache: Partial<Record<Env, FailureCacheEntry>> = {};
+const FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // don't retry a failed login for 5 minutes
+
 function getCreds() {
   const {
     TRADOVATE_USERNAME,
@@ -62,6 +66,14 @@ export async function getAccessToken(env: Env): Promise<string> {
     return cached.token;
   }
 
+  const failure = failureCache[env];
+  if (failure && failure.retryAfter > Date.now()) {
+    const waitMin = Math.ceil((failure.retryAfter - Date.now()) / 60000);
+    throw new Error(
+      `Skipping Tradovate login retry (cooling down after a recent failure, ~${waitMin} min left): ${failure.error}`
+    );
+  }
+
   const creds = getCreds();
   const res = await fetch(`${baseUrl(env)}/auth/accesstokenrequest`, {
     method: "POST",
@@ -72,11 +84,12 @@ export async function getAccessToken(env: Env): Promise<string> {
   const body = await res.json().catch(() => ({}));
 
   if (!res.ok || !body.accessToken) {
-    throw new Error(
-      `Tradovate auth failed (${env}): ${res.status} ${JSON.stringify(body)}`
-    );
+    const errorMsg = `Tradovate auth failed (${env}): ${res.status} ${JSON.stringify(body)}`;
+    failureCache[env] = { error: errorMsg, retryAfter: Date.now() + FAILURE_COOLDOWN_MS };
+    throw new Error(errorMsg);
   }
 
+  delete failureCache[env];
   const expiresAt = body.expirationTime
     ? new Date(body.expirationTime).getTime()
     : Date.now() + 60 * 60 * 1000;
