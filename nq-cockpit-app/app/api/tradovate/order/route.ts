@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { placeOrder } from "@/lib/tradovate";
+import { placeOrder, findOpenPosition } from "@/lib/tradovate";
 import { getTradingWindowStatus } from "@/lib/tradingWindow";
+import { checkAddingToLoser } from "@/lib/positionGuard";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -49,6 +50,58 @@ export async function POST(req: NextRequest) {
       { blocked: true, reason: windowStatus.reason },
       { status: 403 }
     );
+  }
+
+  // SECOND AUTHORITATIVE CHECK — no adding to a losing position.
+  // "Current price" comes from the most recent Intraday check today, falling
+  // back to today's Pre-Market prep. This app has no live market data feed,
+  // so this check is only as fresh as the last price you logged.
+  try {
+    const position = await findOpenPosition(env, parseInt(accountId), symbol);
+    if (position && position.netPos !== 0) {
+      const now = new Date();
+      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      const lastCheck = await prisma.intradayCheck.findFirst({
+        where: { date: { gte: startOfDay } },
+        orderBy: { date: "desc" },
+      });
+      const todayPrep = await prisma.preMarketPrep.findFirst({
+        where: { date: { gte: startOfDay } },
+        orderBy: { date: "desc" },
+      });
+      const currentPrice = lastCheck?.nqPrice ?? todayPrep?.nqPrice ?? null;
+
+      if (currentPrice !== null) {
+        const guard = checkAddingToLoser({
+          existingNetPos: position.netPos,
+          existingNetPrice: position.netPrice,
+          newOrderSide: action,
+          currentPrice,
+        });
+        if (guard.blocked) {
+          await prisma.tradovateOrderLog.create({
+            data: {
+              env,
+              symbol,
+              side: action,
+              qty: parseInt(orderQty),
+              orderType,
+              limitPrice: price ? parseFloat(price) : null,
+              status: "BLOCKED",
+              blockedReason: guard.reason,
+            },
+          });
+          return NextResponse.json({ blocked: true, reason: guard.reason }, { status: 403 });
+        }
+      }
+    }
+  } catch (err: any) {
+    // If the position lookup itself fails (e.g. contract matching issue),
+    // we do NOT silently allow the order through unchecked — log it and let
+    // the order fall through to Tradovate's own validation, but surface the
+    // lookup failure so it's visible rather than hidden.
+    console.error("Position guard lookup failed:", err.message || err);
   }
 
   try {

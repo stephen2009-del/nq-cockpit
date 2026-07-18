@@ -39,6 +39,14 @@ export function getTradingWindowStatus(
   const cutoff = end - settings.cutoffMinutesBeforeClose;
   const etLabel = minutesToLabel(current);
 
+  const etWeekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+  }).format(now);
+  if (etWeekday === "Sat" || etWeekday === "Sun") {
+    return { allowed: false, reason: `Markets are closed on weekends (${etWeekday}).`, etLabel };
+  }
+
   if (current < start) {
     return {
       allowed: false,

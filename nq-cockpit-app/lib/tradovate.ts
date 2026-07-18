@@ -109,6 +109,37 @@ export async function getFills(env: Env, accountId: number) {
   return result;
 }
 
+export async function getPositions(env: Env, accountId: number) {
+  const result = await tradovateFetch(env, `/position/list?accountId=${accountId}`);
+  return result;
+}
+
+export async function getContractName(env: Env, contractId: number) {
+  const result = await tradovateFetch(env, `/contract/item?id=${contractId}`);
+  return result;
+}
+
+// Finds the open position (if any) matching a given symbol for an account.
+// Tradovate's /position/list returns positions keyed by contractId, not the
+// text symbol, so this resolves each position's contract name to compare.
+// NOTE: not tested against a live response — if position matching seems to
+// silently miss, check the contract name format Tradovate actually returns
+// (e.g. "NQZ5" vs "NQZ2025" vs a root-only "NQ") and adjust the comparison.
+export async function findOpenPosition(env: Env, accountId: number, symbol: string) {
+  const positions = await getPositions(env, accountId);
+  if (!positions.ok || !Array.isArray(positions.body)) return null;
+
+  const openPositions = positions.body.filter((p: any) => p.netPos && p.netPos !== 0);
+  for (const pos of openPositions) {
+    const contract = await getContractName(env, pos.contractId);
+    const name: string = contract.ok ? (contract.body.name || "") : "";
+    if (name.toUpperCase() === symbol.toUpperCase() || name.toUpperCase().startsWith(symbol.toUpperCase())) {
+      return { ...pos, contractName: name };
+    }
+  }
+  return null;
+}
+
 export async function placeOrder(
   env: Env,
   params: {
