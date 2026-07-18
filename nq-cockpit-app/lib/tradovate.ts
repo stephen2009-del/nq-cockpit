@@ -122,6 +122,20 @@ export async function getFills(env: Env, accountId: number) {
   return result;
 }
 
+// Fills with contract IDs resolved to readable symbol names — shared by the
+// analytics route and the order route's daily-loss-limit check.
+export async function getEnrichedFills(env: Env, accountId: number) {
+  const fillsResult = await getFills(env, accountId);
+  const fills = fillsResult.ok && Array.isArray(fillsResult.body) ? fillsResult.body : [];
+  const uniqueContractIds = Array.from(new Set(fills.map((f: any) => f.contractId).filter(Boolean)));
+  const nameMap: Record<number, string> = {};
+  for (const id of uniqueContractIds) {
+    const contract = await getContractName(env, id as number);
+    nameMap[id as number] = contract.ok ? contract.body.name || String(id) : String(id);
+  }
+  return fills.map((f: any) => ({ ...f, symbolName: nameMap[f.contractId] || String(f.contractId) }));
+}
+
 export async function getPositions(env: Env, accountId: number) {
   const result = await tradovateFetch(env, `/position/list?accountId=${accountId}`);
   return result;

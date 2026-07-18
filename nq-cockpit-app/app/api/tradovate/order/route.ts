@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { placeOrder, findOpenPosition } from "@/lib/tradovate";
-import { getTradingWindowStatus } from "@/lib/tradingWindow";
+import { placeOrder, findOpenPosition, getEnrichedFills } from "@/lib/tradovate";
+import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
+import { matchFillsToTrades } from "@/lib/fifoMatch";
+import { getActiveLockout, createLockout } from "@/lib/lockout";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -26,6 +28,23 @@ export async function POST(req: NextRequest) {
   let settings = await prisma.settings.findUnique({ where: { id: 1 } });
   if (!settings) {
     settings = await prisma.settings.create({ data: { id: 1 } });
+  }
+
+  // GUARD 0 — active manual/auto lockout. Checked before anything else.
+  const activeLockout = await getActiveLockout();
+  if (activeLockout) {
+    await prisma.tradovateOrderLog.create({
+      data: {
+        env, symbol, side: action, qty: parseInt(orderQty), orderType,
+        limitPrice: price ? parseFloat(price) : null,
+        status: "BLOCKED",
+        blockedReason: `Locked until ${activeLockout.until.toISOString()} — ${activeLockout.reason}`,
+      },
+    });
+    return NextResponse.json(
+      { blocked: true, reason: `Locked until ${activeLockout.until.toISOString()} — ${activeLockout.reason}` },
+      { status: 403 }
+    );
   }
 
   // AUTHORITATIVE server-side check — this is what actually blocks the trade.
@@ -102,6 +121,37 @@ export async function POST(req: NextRequest) {
     // the order fall through to Tradovate's own validation, but surface the
     // lookup failure so it's visible rather than hidden.
     console.error("Position guard lookup failed:", err.message || err);
+  }
+
+  // GUARD 3 — daily loss limit, computed from REAL Tradovate fills (not the
+  // manually-logged Journal). If today's realized P&L has hit your Settings
+  // loss limit, this auto-creates a lockout for the rest of the trading day
+  // and blocks this order too. Adds a bit of latency (fetches + resolves
+  // today's fills before every order) — a known tradeoff for using real data.
+  try {
+    const enrichedFills = await getEnrichedFills(env, parseInt(accountId));
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todaysFills = enrichedFills.filter((f: any) => new Date(f.timestamp) >= startOfDay);
+    const matched = matchFillsToTrades(todaysFills as any, settings.multiplier);
+    const todaysRealizedPnl = matched.reduce((s, t) => s + t.pnl, 0);
+
+    if (todaysRealizedPnl <= -settings.dailyLossLimit) {
+      const until = etTimeTodayToUtc(settings.tradingWindowEnd);
+      await createLockout(until, `Daily loss limit reached (${todaysRealizedPnl.toFixed(2)} vs limit -${settings.dailyLossLimit})`);
+      const reason = `Daily loss limit reached: realized P&L ${todaysRealizedPnl.toFixed(2)} vs. your limit of -${settings.dailyLossLimit}. Trading locked for the rest of the day.`;
+      await prisma.tradovateOrderLog.create({
+        data: {
+          env, symbol, side: action, qty: parseInt(orderQty), orderType,
+          limitPrice: price ? parseFloat(price) : null,
+          status: "BLOCKED",
+          blockedReason: reason,
+        },
+      });
+      return NextResponse.json({ blocked: true, reason }, { status: 403 });
+    }
+  } catch (err: any) {
+    console.error("Daily loss limit check failed:", err.message || err);
   }
 
   try {

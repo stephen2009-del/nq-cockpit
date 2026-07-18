@@ -82,3 +82,10 @@ model IntradayCheck {
   qqqPrice Float
   nqPrice  Float
 }
+
+model TradeLockout {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  until     DateTime
+  reason    String
+}

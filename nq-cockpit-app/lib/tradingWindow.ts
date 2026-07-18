@@ -1,3 +1,32 @@
+function getEtOffsetString(date: Date): string {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    timeZoneName: "shortOffset",
+  });
+  const offsetPart = dtf.formatToParts(date).find((p) => p.type === "timeZoneName")?.value || "GMT-5";
+  const match = offsetPart.match(/GMT([+-]\d+)/);
+  const offsetHours = match ? parseInt(match[1], 10) : -5;
+  const sign = offsetHours <= 0 ? "-" : "+";
+  const abs = String(Math.abs(offsetHours)).padStart(2, "0");
+  return `${sign}${abs}:00`;
+}
+
+// Builds a proper UTC Date object for a given "HH:MM" time on *today's* date,
+// as measured in US Eastern time (handles EST/EDT automatically).
+export function etTimeTodayToUtc(hhmm: string, now: Date = new Date()): Date {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  const d = parts.find((p) => p.type === "day")!.value;
+  const offset = getEtOffsetString(now);
+  return new Date(`${y}-${m}-${d}T${hhmm}:00${offset}`);
+}
+
 export type TradingWindowSettings = {
   tradingWindowStart: string; // "09:30"
   tradingWindowEnd: string; // "16:00"

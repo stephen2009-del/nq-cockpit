@@ -915,6 +915,35 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
+  const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
+  const [lockingOut, setLockingOut] = useState(false);
+
+  function refreshLockout() {
+    fetch("/api/tradovate/lockout").then((r) => r.json()).then((d) => setLockout(d.active));
+  }
+
+  async function triggerLockout(minutes?: number, restOfDay?: boolean) {
+    const label = restOfDay ? "the rest of the trading day" : `${minutes} minutes`;
+    if (!confirm(`Lock trading for ${label}? This cannot be undone or canceled early once set.`)) return;
+    setLockingOut(true);
+    const res = await fetch("/api/tradovate/lockout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(restOfDay ? { restOfDay: true } : { minutes }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || "Could not create lockout.");
+    }
+    refreshLockout();
+    setLockingOut(false);
+  }
+
+  useEffect(() => {
+    refreshLockout();
+    const interval = setInterval(refreshLockout, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(() => setWindowStatus(getTradingWindowStatus(settings)), 15000);
@@ -1008,6 +1037,12 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           {windowStatus.allowed ? "✓ " : "⛔ "}{windowStatus.reason} (Current ET time: {windowStatus.etLabel})
         </div>
 
+        {lockout && (
+          <div className="status-banner" style={{ marginTop: 8, borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" }}>
+            ⛔ LOCKED — {lockout.reason}. Unlocks at {new Date(lockout.until).toLocaleString()}. Cannot be overridden or canceled early.
+          </div>
+        )}
+
         <div className="status-banner" style={{ marginTop: 8, background: connStatus?.connected ? "rgba(63,208,201,0.1)" : "rgba(245,166,35,0.1)", borderColor: connStatus?.connected ? "var(--cyan-dim)" : "var(--amber-dim)", color: connStatus?.connected ? "var(--cyan)" : "var(--amber)" }}>
           {connStatus === null ? "Checking Tradovate connection…" : connStatus.connected ? `✓ Connected to Tradovate (${settings.tradovateEnv})` : `⚠ Not connected: ${JSON.stringify(connStatus.error)}`}
         </div>
@@ -1070,9 +1105,23 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           </button>
         )}
 
-        <button className="btn primary" onClick={submitOrder} disabled={submitting || !windowStatus.allowed || resolving || !resolvedSymbol?.symbol}>
-          {submitting ? "Submitting…" : !windowStatus.allowed ? "Blocked — outside trading window" : resolving ? "Resolving contract…" : !resolvedSymbol?.symbol ? "No contract resolved" : "Submit Order"}
+        <button className="btn primary" onClick={submitOrder} disabled={submitting || !!lockout || !windowStatus.allowed || resolving || !resolvedSymbol?.symbol}>
+          {submitting ? "Submitting…" : lockout ? "Locked" : !windowStatus.allowed ? "Blocked — outside trading window" : resolving ? "Resolving contract…" : !resolvedSymbol?.symbol ? "No contract resolved" : "Submit Order"}
         </button>
+
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+          <div className="card-label" style={{ marginBottom: 8 }}>MANUAL LOCKOUT</div>
+          <div className="panel-desc" style={{ marginTop: 0 }}>
+            Lock yourself out of Trade Ticket for a set period — same idea as Tradovate's own lockout feature,
+            since it isn't available on your account type. Once set, it cannot be canceled early, by design.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(30)}>Lock 30 min</button>
+            <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(60)}>Lock 1 hour</button>
+            <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(120)}>Lock 2 hours</button>
+            <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(undefined, true)}>Lock rest of day</button>
+          </div>
+        </div>
 
         {result && (
           <div
