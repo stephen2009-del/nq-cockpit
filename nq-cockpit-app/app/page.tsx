@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 import { getTradingWindowStatus } from "@/lib/tradingWindow";
+import { matchFillsToTrades, MatchedTrade } from "@/lib/fifoMatch";
 
 type Rule = { id: number; text: string; order: number };
 type Trade = {
@@ -105,7 +106,7 @@ export default function Page() {
     tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, tradovateEnv: "demo",
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"premarket" | "intraday" | "tradeticket" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
+  const [tab, setTab] = useState<"premarket" | "intraday" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
   const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
   const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "", openInterestNotes: "" });
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
@@ -340,9 +341,9 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["premarket", "intraday", "tradeticket", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
+        {(["premarket", "intraday", "tradeticket", "tvanalytics", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t === "tradeticket" ? "Trade Ticket" : t}
+            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t === "tradeticket" ? "Trade Ticket" : t === "tvanalytics" ? "TV Analytics" : t}
           </button>
         ))}
       </div>
@@ -350,6 +351,7 @@ export default function Page() {
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
 
       {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
+      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} />}
 
       {tab === "intraday" && (
         <IntradayTab
@@ -1049,6 +1051,310 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: number) {
+  let cum = 0;
+  const points = trades.map((t) => (cum += t.pnl));
+  const min = Math.min(0, ...points, 0);
+  const max = Math.max(0, ...points, 0);
+  const range = max - min || 1;
+  const stepX = points.length > 1 ? (w - 2 * pad) / (points.length - 1) : 0;
+  const coords = points.map((p, i) => `${pad + i * stepX},${h - pad - ((p - min) / range) * (h - 2 * pad)}`).join(" ");
+  const zeroY = h - pad - ((0 - min) / range) * (h - 2 * pad);
+  return { coords, zeroY, points };
+}
+
+function buildAnalyticsHtmlReport(
+  accountLabel: string,
+  cashBalance: any,
+  matchedTrades: MatchedTrade[],
+  totalPnl: number,
+  winRate: number
+) {
+  const rows = matchedTrades
+    .map(
+      (t) => `
+    <tr>
+      <td>${new Date(t.exitTime).toLocaleString()}</td>
+      <td>${t.symbol}</td>
+      <td>${t.side.toUpperCase()}</td>
+      <td>${t.qty}</td>
+      <td>${t.entryPrice.toFixed(2)}</td>
+      <td>${t.exitPrice.toFixed(2)}</td>
+      <td style="color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${fmtMoney(t.pnl)}</td>
+    </tr>`
+    )
+    .join("");
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>NQ Cockpit — Tradovate Analytics Report</title>
+<style>
+body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:32px;}
+h1{color:#F5A623;} h2{color:#3FD0C9;margin-top:32px;}
+table{border-collapse:collapse;width:100%;margin-top:12px;}
+th,td{padding:8px 10px;border-bottom:1px solid #263654;text-align:left;font-size:13px;}
+th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
+.stat{display:inline-block;margin-right:32px;font-size:14px;}
+.stat b{display:block;font-size:20px;color:#3FD0C9;}
+</style></head>
+<body>
+<h1>NQ COCKPIT — Tradovate Analytics Report</h1>
+<p>${accountLabel} · Generated ${new Date().toLocaleString()}</p>
+<div class="stat"><b>${fmtMoney(totalPnl)}</b>Realized P&amp;L (matched trades)</div>
+<div class="stat"><b>${matchedTrades.length}</b>Closed Trades</div>
+<div class="stat"><b>${winRate}%</b>Win Rate</div>
+<div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
+<h2>Closed Trades (FIFO matched)</h2>
+<table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
+<p style="color:#7F8CA6;font-size:11px;margin-top:24px;">Realized P&amp;L is calculated by this app via FIFO matching of Tradovate fills — cross-check against Tradovate's own statements before relying on it for tax or accounting purposes.</p>
+</body></html>`;
+}
+
+function downloadHtmlReport(html: string, filename: string) {
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function downloadAnalyticsPdf(
+  accountLabel: string,
+  cashBalance: any,
+  matchedTrades: MatchedTrade[],
+  totalPnl: number,
+  winRate: number
+) {
+  const doc = new jsPDF();
+  let y = 20;
+  doc.setFont("courier", "bold");
+  doc.setFontSize(16);
+  doc.text("NQ COCKPIT — Tradovate Analytics Report", 14, y);
+  y += 7;
+  doc.setFontSize(10);
+  doc.setFont("courier", "normal");
+  doc.text(`${accountLabel} · ${new Date().toLocaleString()}`, 14, y);
+  y += 10;
+
+  doc.setFontSize(11);
+  doc.text(`Realized P&L: ${fmtMoney(totalPnl)}`, 14, y);
+  doc.text(`Closed Trades: ${matchedTrades.length}`, 90, y);
+  doc.text(`Win Rate: ${winRate}%`, 150, y);
+  y += 12;
+
+  // Equity curve, drawn as vector lines directly (no canvas needed)
+  if (matchedTrades.length > 1) {
+    const chartW = 180, chartH = 50, chartX = 14, chartY = y;
+    const { points } = equityCurvePoints(matchedTrades, chartW, chartH, 0);
+    const min = Math.min(0, ...points);
+    const max = Math.max(0, ...points);
+    const range = max - min || 1;
+    doc.setDrawColor(63, 208, 201);
+    doc.rect(chartX, chartY, chartW, chartH);
+    for (let i = 0; i < points.length - 1; i++) {
+      const x1 = chartX + (i / (points.length - 1)) * chartW;
+      const x2 = chartX + ((i + 1) / (points.length - 1)) * chartW;
+      const y1 = chartY + chartH - ((points[i] - min) / range) * chartH;
+      const y2 = chartY + chartH - ((points[i + 1] - min) / range) * chartH;
+      doc.line(x1, y1, x2, y2);
+    }
+    y += chartH + 12;
+    doc.setFont("courier", "normal");
+    doc.setFontSize(9);
+    doc.text("Equity curve (realized P&L, FIFO-matched)", chartX, y);
+    y += 10;
+  }
+
+  doc.setFont("courier", "bold");
+  doc.setFontSize(10);
+  doc.text("Time", 14, y);
+  doc.text("Symbol", 55, y);
+  doc.text("Side", 85, y);
+  doc.text("Entry", 105, y);
+  doc.text("Exit", 130, y);
+  doc.text("P&L", 160, y);
+  y += 6;
+  doc.setFont("courier", "normal");
+
+  matchedTrades.forEach((t) => {
+    if (y > 280) {
+      doc.addPage();
+      y = 20;
+    }
+    doc.text(new Date(t.exitTime).toLocaleDateString(), 14, y);
+    doc.text(t.symbol, 55, y);
+    doc.text(t.side.toUpperCase(), 85, y);
+    doc.text(t.entryPrice.toFixed(2), 105, y);
+    doc.text(t.exitPrice.toFixed(2), 130, y);
+    doc.text(fmtMoney(t.pnl), 160, y);
+    y += 6;
+  });
+
+  doc.save(`nq-cockpit-tradovate-analytics-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
+function TVAnalyticsTab({ settings }: { settings: Settings }) {
+  const [accountId, setAccountId] = useState("");
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{ fills: any[]; positions: any[]; cashBalance: any } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
+      .then((r) => r.json())
+      .then((d) => setAccounts(d.accounts || []));
+  }, [settings.tradovateEnv]);
+
+  async function sync() {
+    if (!accountId) {
+      alert("Select an account first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tradovate/analytics?env=${settings.tradovateEnv}&accountId=${accountId}`);
+      const d = await res.json();
+      if (d.error) {
+        setError(d.error);
+      } else {
+        setData(d);
+      }
+    } catch (err: any) {
+      setError(err.message || String(err));
+    }
+    setLoading(false);
+  }
+
+  const matchedTrades = data ? matchFillsToTrades(data.fills, settings.multiplier) : [];
+  const totalPnl = matchedTrades.reduce((s, t) => s + t.pnl, 0);
+  const wins = matchedTrades.filter((t) => t.pnl > 0).length;
+  const winRate = matchedTrades.length ? Math.round((wins / matchedTrades.length) * 100) : 0;
+  const accountLabel = `${settings.tradovateEnv.toUpperCase()} account ${accounts.find((a) => String(a.id) === accountId)?.name || accountId}`;
+
+  const chart = matchedTrades.length > 1 ? equityCurvePoints(matchedTrades, 900, 180, 10) : null;
+
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Tradovate Analytics</div>
+        <div className="panel-desc">Pulls your real fills, positions, and account balance directly from Tradovate — {settings.tradovateEnv.toUpperCase()} environment. Read-only, no orders placed.</div>
+        <div className="grid2">
+          <div className="field"><label>Account</label>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+              <option value="">Select account…</option>
+              {accounts.map((a: any) => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button className="btn primary" onClick={sync} disabled={loading} style={{ width: "100%" }}>
+              {loading ? "Syncing…" : "Pull Analytics"}
+            </button>
+          </div>
+        </div>
+        {error && <div className="status-banner status-warn" style={{ marginTop: 12 }}>⚠ {JSON.stringify(error)}</div>}
+      </div>
+
+      {data && (
+        <>
+          <div className="panel-box">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <div className="panel-title" style={{ margin: 0 }}>Account Summary</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn small ghost" onClick={() => downloadHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate), `nq-cockpit-analytics-${new Date().toISOString().slice(0, 10)}.html`)}>Download HTML</button>
+                <button className="btn small ghost" onClick={() => downloadAnalyticsPdf(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate)}>Download PDF</button>
+              </div>
+            </div>
+            <div className="stat-grid">
+              <div className="stat-box"><div className={`stat-num ${totalPnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(totalPnl)}</div><div className="stat-lbl">Realized P&amp;L</div></div>
+              <div className="stat-box"><div className="stat-num">{matchedTrades.length}</div><div className="stat-lbl">Closed Trades</div></div>
+              <div className="stat-box"><div className="stat-num">{winRate}%</div><div className="stat-lbl">Win Rate</div></div>
+              <div className="stat-box"><div className="stat-num">{data.cashBalance?.netLiq !== undefined ? fmtMoney(data.cashBalance.netLiq) : "—"}</div><div className="stat-lbl">Net Liquidity (live)</div></div>
+            </div>
+          </div>
+
+          {chart && (
+            <div className="panel-box">
+              <div className="panel-title">Equity Curve (Realized, FIFO-matched)</div>
+              <svg viewBox="0 0 900 180" style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
+                <line x1="0" y1={chart.zeroY} x2="900" y2={chart.zeroY} stroke="var(--line)" strokeDasharray="4 4" />
+                <polyline points={chart.coords} fill="none" stroke={totalPnl >= 0 ? "var(--cyan)" : "var(--red)"} strokeWidth="2" />
+              </svg>
+            </div>
+          )}
+
+          <div className="panel-box">
+            <div className="panel-title">Open Positions</div>
+            {data.positions.length === 0 ? (
+              <div className="empty-state">No open positions.</div>
+            ) : (
+              <table>
+                <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th></tr></thead>
+                <tbody>
+                  {data.positions.map((p: any) => (
+                    <tr key={p.id}><td>{p.symbolName}</td><td>{p.netPos}</td><td>{p.netPrice?.toFixed(2)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="panel-box">
+            <div className="panel-title">Closed Trades (FIFO Matched)</div>
+            {matchedTrades.length === 0 ? (
+              <div className="empty-state">No closed round-trip trades found yet.</div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table>
+                  <thead><tr><th>Exit</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
+                  <tbody>
+                    {[...matchedTrades].reverse().map((t, i) => (
+                      <tr key={i}>
+                        <td>{new Date(t.exitTime).toLocaleString()}</td>
+                        <td>{t.symbol}</td>
+                        <td><span className={`tag ${t.side === "long" ? "long" : "short"}`}>{t.side.toUpperCase()}</span></td>
+                        <td>{t.qty}</td>
+                        <td>{t.entryPrice.toFixed(2)}</td>
+                        <td>{t.exitPrice.toFixed(2)}</td>
+                        <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="panel-box">
+            <div className="panel-title">Raw Fills</div>
+            <div style={{ overflowX: "auto" }}>
+              <table>
+                <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead>
+                <tbody>
+                  {[...data.fills].reverse().map((f: any) => (
+                    <tr key={f.id}>
+                      <td>{new Date(f.timestamp).toLocaleString()}</td>
+                      <td>{f.symbolName}</td>
+                      <td><span className={`tag ${f.action === "Buy" ? "long" : "short"}`}>{f.action.toUpperCase()}</span></td>
+                      <td>{f.qty}</td>
+                      <td>{f.price?.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }

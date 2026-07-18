@@ -119,6 +119,14 @@ export async function getContractName(env: Env, contractId: number) {
   return result;
 }
 
+export async function getCashBalance(env: Env, accountId: number) {
+  const result = await tradovateFetch(env, "/cashBalance/getcashbalancesnapshot", {
+    method: "POST",
+    body: JSON.stringify({ accountId }),
+  });
+  return result;
+}
+
 // Finds the open position (if any) matching a given symbol for an account.
 // Tradovate's /position/list returns positions keyed by contractId, not the
 // text symbol, so this resolves each position's contract name to compare.
