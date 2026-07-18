@@ -797,6 +797,104 @@ function buildObservations(
   return obs;
 }
 
+function computeIntradayChartData(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null, w: number, h: number, pad: number) {
+  const nqLow = todayPrep ? (todayPrep.qqqPrice - todayPrep.estimatedMove) * todayPrep.multiplier : null;
+  const nqHigh = todayPrep ? (todayPrep.qqqPrice + todayPrep.estimatedMove) * todayPrep.multiplier : null;
+  const nqAnchor = todayPrep ? todayPrep.nqPrice : null;
+
+  const values = checks.map((c) => c.nqPrice);
+  if (nqLow !== null) values.push(nqLow);
+  if (nqHigh !== null) values.push(nqHigh);
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 1;
+  const range = max - min || 1;
+
+  const times = checks.map((c) => new Date(c.date).getTime());
+  const minT = times.length ? Math.min(...times) : 0;
+  const maxT = times.length ? Math.max(...times) : 1;
+  const tRange = maxT - minT || 1;
+
+  const scaleX = (t: number) => pad + ((t - minT) / tRange) * (w - 2 * pad);
+  const scaleY = (v: number) => h - pad - ((v - min) / range) * (h - 2 * pad);
+
+  const coords = checks.map((c) => `${scaleX(new Date(c.date).getTime())},${scaleY(c.nqPrice)}`).join(" ");
+
+  return {
+    coords,
+    nqLowY: nqLow !== null ? scaleY(nqLow) : null,
+    nqHighY: nqHigh !== null ? scaleY(nqHigh) : null,
+    nqAnchorY: nqAnchor !== null ? scaleY(nqAnchor) : null,
+    nqLow, nqHigh, nqAnchor,
+    points: checks.map((c) => ({ x: scaleX(new Date(c.date).getTime()), y: scaleY(c.nqPrice), label: new Date(c.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), value: c.nqPrice })),
+  };
+}
+
+function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayPrep: PreMarketPrep | null }) {
+  const w = 900, h = 220, pad = 30;
+  if (checks.length === 0) {
+    return <div className="empty-state">Log at least one Intraday check to see today's chart.</div>;
+  }
+  const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 220 }} preserveAspectRatio="none">
+      {data.nqHighY !== null && (
+        <>
+          <line x1={pad} y1={data.nqHighY} x2={w - pad} y2={data.nqHighY} stroke="var(--red)" strokeDasharray="4 4" />
+          <text x={w - pad} y={data.nqHighY - 4} fill="var(--red)" fontSize="10" textAnchor="end">Est. High {data.nqHigh?.toFixed(1)}</text>
+        </>
+      )}
+      {data.nqLowY !== null && (
+        <>
+          <line x1={pad} y1={data.nqLowY} x2={w - pad} y2={data.nqLowY} stroke="var(--red)" strokeDasharray="4 4" />
+          <text x={w - pad} y={data.nqLowY + 12} fill="var(--red)" fontSize="10" textAnchor="end">Est. Low {data.nqLow?.toFixed(1)}</text>
+        </>
+      )}
+      {data.nqAnchorY !== null && (
+        <line x1={pad} y1={data.nqAnchorY} x2={w - pad} y2={data.nqAnchorY} stroke="var(--amber)" strokeDasharray="2 3" />
+      )}
+      <polyline points={data.coords} fill="none" stroke="var(--cyan)" strokeWidth="2" />
+      {data.points.map((p, i) => (
+        <circle key={i} cx={p.x} cy={p.y} r="3" fill="var(--cyan)" />
+      ))}
+    </svg>
+  );
+}
+
+function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
+  const w = 900, h = 220, pad = 30;
+  const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
+  const svg = `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px;background:#121B2E;border-radius:8px;" xmlns="http://www.w3.org/2000/svg">
+      ${data.nqHighY !== null ? `<line x1="${pad}" y1="${data.nqHighY}" x2="${w - pad}" y2="${data.nqHighY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqHighY - 4}" fill="#E5484D" font-size="10" text-anchor="end">Est. High ${data.nqHigh?.toFixed(1)}</text>` : ""}
+      ${data.nqLowY !== null ? `<line x1="${pad}" y1="${data.nqLowY}" x2="${w - pad}" y2="${data.nqLowY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqLowY + 12}" fill="#E5484D" font-size="10" text-anchor="end">Est. Low ${data.nqLow?.toFixed(1)}</text>` : ""}
+      ${data.nqAnchorY !== null ? `<line x1="${pad}" y1="${data.nqAnchorY}" x2="${w - pad}" y2="${data.nqAnchorY}" stroke="#F5A623" stroke-dasharray="2 3"/>` : ""}
+      <polyline points="${data.coords}" fill="none" stroke="#3FD0C9" stroke-width="2"/>
+      ${data.points.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#3FD0C9"/>`).join("")}
+    </svg>`;
+
+  const rows = checks.map((c) => `
+    <tr><td>${new Date(c.date).toLocaleTimeString()}</td><td>${c.qqqPrice.toFixed(2)}</td><td>${c.nqPrice.toFixed(2)}</td></tr>`).join("");
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>NQ Cockpit — Intraday Chart</title>
+<style>
+body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:32px;}
+h1{color:#F5A623;} table{border-collapse:collapse;width:100%;margin-top:16px;}
+th,td{padding:8px 10px;border-bottom:1px solid #263654;text-align:left;font-size:13px;}
+th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
+</style></head>
+<body>
+<h1>NQ COCKPIT — Intraday Chart</h1>
+<p>${new Date().toLocaleDateString()} · ${checks.length} check(s) logged</p>
+${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} · Estimated move: ±${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
+${svg}
+<table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
+<p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Built from manually logged Intraday checks — not a live market data feed.</p>
+</body></html>`;
+
+  downloadHtmlReport(html, `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
+}
+
 function IntradayTab({
   input,
   setInput,
@@ -864,6 +962,15 @@ function IntradayTab({
             </div>
           </div>
         )}
+      </div>
+
+      <div className="panel-box">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div className="panel-title" style={{ margin: 0 }}>Today's Chart</div>
+          <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
+        </div>
+        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Built from your manual checks — not a live feed.</div>
+        <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
 
       <div className="panel-box">
