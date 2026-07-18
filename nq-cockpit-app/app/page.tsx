@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import jsPDF from "jspdf";
 
 type Rule = { id: number; text: string; order: number };
 type Trade = {
@@ -20,7 +21,8 @@ type Trade = {
   checklistSnapshot: { rule: string; passed: boolean }[];
 };
 type Settings = { id: number; dailyLossLimit: number; contract: string; multiplier: number };
-type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number };
+type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
+type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
 
 const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
 
@@ -89,9 +91,11 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({ id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20 });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"premarket" | "checklist" | "journal" | "dashboard" | "settings">("premarket");
+  const [tab, setTab] = useState<"premarket" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
   const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
-  const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "" });
+  const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "", openInterestNotes: "" });
+  const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
+  const [oiForm, setOiForm] = useState({ strike: "", oi: "", note: "" });
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
   const [newRuleText, setNewRuleText] = useState("");
@@ -104,11 +108,12 @@ export default function Page() {
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3, r4] = await Promise.all([
+    const [r1, r2, r3, r4, r5] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
       fetch("/api/premarket").then((r) => r.json()),
+      fetch("/api/oi-levels").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -118,6 +123,7 @@ export default function Page() {
     r1.forEach((rule: Rule) => (c[rule.id] = false));
     setChecked(c);
     setPreMarketHistory(r4);
+    setOiLevels(r5);
     const today = new Date().toDateString();
     const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
     if (todayEntry) {
@@ -125,6 +131,7 @@ export default function Page() {
         qqqPrice: String(todayEntry.qqqPrice),
         multiplier: String(todayEntry.multiplier),
         estimatedMove: String(todayEntry.estimatedMove),
+        openInterestNotes: todayEntry.openInterestNotes || "",
       });
     }
     setLoading(false);
@@ -227,9 +234,32 @@ export default function Page() {
     }
     const saved = await fetch("/api/premarket", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ qqqPrice, multiplier, estimatedMove }),
+      body: JSON.stringify({ qqqPrice, multiplier, estimatedMove, openInterestNotes: preMarketForm.openInterestNotes }),
     }).then((r) => r.json());
     setPreMarketHistory((h) => [saved, ...h.filter((p) => p.id !== saved.id)]);
+  }
+
+  async function addOiLevel() {
+    const strike = parseFloat(oiForm.strike);
+    const oi = parseFloat(oiForm.oi);
+    if (isNaN(strike) || isNaN(oi)) {
+      alert("Enter a strike price and an OI amount.");
+      return;
+    }
+    const level = await fetch("/api/oi-levels", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strike, oi, note: oiForm.note }),
+    }).then((r) => r.json());
+    setOiLevels((l) => [level, ...l]);
+    setOiForm({ strike: "", oi: "", note: "" });
+  }
+
+  async function deleteOiLevel(id: number) {
+    await fetch("/api/oi-levels", {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    setOiLevels((l) => l.filter((x) => x.id !== id));
   }
 
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
@@ -273,7 +303,7 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["premarket", "checklist", "journal", "dashboard", "settings"] as const).map((t) => (
+        {(["premarket", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t}
           </button>
@@ -288,8 +318,15 @@ export default function Page() {
           setForm={setPreMarketForm}
           onSave={savePreMarket}
           history={preMarketHistory}
+          oiLevels={oiLevels}
+          oiForm={oiForm}
+          setOiForm={setOiForm}
+          onAddOi={addOiLevel}
+          onDeleteOi={deleteOiLevel}
         />
       )}
+
+      {tab === "reports" && <ReportsTab trades={trades} />}
 
       {tab === "checklist" && (
         <>
@@ -427,11 +464,21 @@ function PreMarketTab({
   setForm,
   onSave,
   history,
+  oiLevels,
+  oiForm,
+  setOiForm,
+  onAddOi,
+  onDeleteOi,
 }: {
-  form: { qqqPrice: string; multiplier: string; estimatedMove: string };
-  setForm: (f: { qqqPrice: string; multiplier: string; estimatedMove: string }) => void;
+  form: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string };
+  setForm: (f: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string }) => void;
   onSave: () => void;
   history: PreMarketPrep[];
+  oiLevels: OILevel[];
+  oiForm: { strike: string; oi: string; note: string };
+  setOiForm: (f: { strike: string; oi: string; note: string }) => void;
+  onAddOi: () => void;
+  onDeleteOi: (id: number) => void;
 }) {
   const qqq = parseFloat(form.qqqPrice);
   const mult = parseFloat(form.multiplier);
@@ -474,6 +521,10 @@ function PreMarketTab({
           <div className="field"><label>Estimated Move (NQ points)</label>
             <input type="number" step="1" value={form.estimatedMove} onChange={(e) => setForm({ ...form, estimatedMove: e.target.value })} placeholder="e.g. 180" />
           </div>
+        </div>
+        <div className="field">
+          <label>Open Interest Notes</label>
+          <textarea value={form.openInterestNotes} onChange={(e) => setForm({ ...form, openInterestNotes: e.target.value })} placeholder="Anything notable pre-market — heavy call/put walls, gamma flip level, unusual OI shifts, etc." />
         </div>
         <button className="btn primary" onClick={onSave} disabled={!valid}>Save Today's Prep</button>
 
@@ -529,7 +580,7 @@ function PreMarketTab({
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table>
-              <thead><tr><th>Date</th><th>QQQ</th><th>Multiplier</th><th>NQ (calc)</th><th>Est. Move</th></tr></thead>
+              <thead><tr><th>Date</th><th>QQQ</th><th>Multiplier</th><th>NQ (calc)</th><th>Est. Move</th><th>OI Notes</th></tr></thead>
               <tbody>
                 {history.map((p) => (
                   <tr key={p.id}>
@@ -538,6 +589,45 @@ function PreMarketTab({
                     <td>{p.multiplier}</td>
                     <td>{p.nqPrice.toFixed(2)}</td>
                     <td>±{p.estimatedMove}</td>
+                    <td style={{ maxWidth: 240, whiteSpace: "normal" }}>{p.openInterestNotes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Open Interest Levels</div>
+        <div className="panel-desc">Log notable strikes and their OI before the open — useful support/resistance reference for the day.</div>
+        <div className="grid3">
+          <div className="field"><label>Strike</label>
+            <input type="number" step="1" value={oiForm.strike} onChange={(e) => setOiForm({ ...oiForm, strike: e.target.value })} placeholder="e.g. 700" />
+          </div>
+          <div className="field"><label>Open Interest</label>
+            <input type="number" step="1" value={oiForm.oi} onChange={(e) => setOiForm({ ...oiForm, oi: e.target.value })} placeholder="e.g. 45000" />
+          </div>
+          <div className="field"><label>Note</label>
+            <input value={oiForm.note} onChange={(e) => setOiForm({ ...oiForm, note: e.target.value })} placeholder="e.g. call wall" />
+          </div>
+        </div>
+        <button className="btn small" onClick={onAddOi}>Add Level</button>
+
+        {oiLevels.length === 0 ? (
+          <div className="empty-state" style={{ marginTop: 16 }}>No levels logged yet.</div>
+        ) : (
+          <div style={{ overflowX: "auto", marginTop: 16 }}>
+            <table>
+              <thead><tr><th>Date</th><th>Strike</th><th>OI</th><th>Note</th><th></th></tr></thead>
+              <tbody>
+                {oiLevels.map((l) => (
+                  <tr key={l.id}>
+                    <td>{new Date(l.date).toLocaleDateString()}</td>
+                    <td>{l.strike}</td>
+                    <td>{l.oi.toLocaleString()}</td>
+                    <td>{l.note || "—"}</td>
+                    <td><button className="btn small ghost" onClick={() => onDeleteOi(l.id)}>Del</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -786,5 +876,126 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
     </>
+  );
+}
+
+function groupTradesByDay(trades: Trade[]) {
+  const map = new Map<string, Trade[]>();
+  trades.forEach((t) => {
+    const key = new Date(t.date).toDateString();
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(t);
+  });
+  return Array.from(map.entries())
+    .map(([dateStr, dayTrades]) => {
+      const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
+      const wins = dayTrades.filter((t) => t.pnl > 0).length;
+      const clean = dayTrades.filter((t) => t.disciplined).length;
+      return {
+        dateStr,
+        trades: dayTrades,
+        pnl,
+        winRate: Math.round((wins / dayTrades.length) * 100),
+        clean,
+        flagged: dayTrades.length - clean,
+      };
+    })
+    .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
+}
+
+function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
+  const doc = new jsPDF();
+  let y = 20;
+  doc.setFont("courier", "bold");
+  doc.setFontSize(16);
+  doc.text("NQ COCKPIT — Daily Report", 14, y);
+  y += 8;
+  doc.setFontSize(10);
+  doc.setFont("courier", "normal");
+  doc.text(day.dateStr, 14, y);
+  y += 10;
+
+  doc.setFontSize(11);
+  doc.text(`P&L: ${fmtMoney(day.pnl)}`, 14, y);
+  doc.text(`Trades: ${day.trades.length}`, 70, y);
+  doc.text(`Win rate: ${day.winRate}%`, 120, y);
+  doc.text(`Clean/Flagged: ${day.clean}/${day.flagged}`, 160, y);
+  y += 10;
+
+  doc.setFont("courier", "bold");
+  doc.text("Time", 14, y);
+  doc.text("Dir", 45, y);
+  doc.text("Setup", 65, y);
+  doc.text("P&L", 110, y);
+  doc.text("Discipline", 140, y);
+  doc.text("Emotion", 170, y);
+  y += 6;
+  doc.setFont("courier", "normal");
+
+  day.trades.forEach((t) => {
+    if (y > 280) {
+      doc.addPage();
+      y = 20;
+    }
+    const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    doc.text(time, 14, y);
+    doc.text(t.dir.toUpperCase(), 45, y);
+    doc.text((t.setup || "-").slice(0, 20), 65, y);
+    doc.text(fmtMoney(t.pnl), 110, y);
+    doc.text(t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
+    doc.text((t.emotion || "-").slice(0, 18), 170, y);
+    y += 6;
+  });
+
+  doc.save(`nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
+}
+
+function ReportsTab({ trades }: { trades: Trade[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const days = groupTradesByDay(trades);
+
+  if (days.length === 0) {
+    return <div className="panel-box"><div className="empty-state"><div className="big">🗒️</div>No trades logged yet — daily reports will appear here once you start.</div></div>;
+  }
+
+  return (
+    <div className="panel-box">
+      <div className="panel-title">Daily Reports</div>
+      <div className="panel-desc">Same numbers as your daily email, browsable here — plus a PDF download for any day.</div>
+      {days.map((day) => (
+        <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+          <div
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", cursor: "pointer", background: "var(--panel-2)" }}
+            onClick={() => setExpanded(expanded === day.dateStr ? null : day.dateStr)}
+          >
+            <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+              <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
+              <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
+              <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged</span>
+            </div>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
+          </div>
+          {expanded === day.dateStr && (
+            <div style={{ padding: "12px 16px", overflowX: "auto" }}>
+              <table>
+                <thead><tr><th>Time</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+                <tbody>
+                  {day.trades.map((t) => (
+                    <tr key={t.id}>
+                      <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                      <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
+                      <td>{t.setup || "—"}</td>
+                      <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
+                      <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
+                      <td>{t.emotion}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

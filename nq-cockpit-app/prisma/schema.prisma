@@ -39,10 +39,19 @@ model Settings {
 }
 
 model PreMarketPrep {
-  id            Int      @id @default(autoincrement())
-  date          DateTime @default(now())
-  qqqPrice      Float
-  multiplier    Float
-  estimatedMove Float
-  nqPrice       Float
+  id                Int      @id @default(autoincrement())
+  date              DateTime @default(now())
+  qqqPrice          Float
+  multiplier        Float
+  estimatedMove     Float
+  nqPrice           Float
+  openInterestNotes String?
+}
+
+model OpenInterestLevel {
+  id     Int      @id @default(autoincrement())
+  date   DateTime @default(now())
+  strike Float
+  oi     Float
+  note   String?
 }
