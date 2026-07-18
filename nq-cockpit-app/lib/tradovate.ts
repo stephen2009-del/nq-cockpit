@@ -22,7 +22,14 @@ const tokenCache: Partial<Record<Env, TokenCacheEntry>> = {};
 
 type FailureCacheEntry = { error: string; retryAfter: number };
 const failureCache: Partial<Record<Env, FailureCacheEntry>> = {};
-const FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // don't retry a failed login for 5 minutes
+const FAILURE_COOLDOWN_MS = 30 * 60 * 1000; // Tradovate's own rate limit is hourly and CAPTCHA-gated once tripped — back off hard
+
+// De-dupes concurrent calls: if multiple parts of the page ask for a token
+// at the same instant (e.g. several components mounting together), they all
+// share the SAME in-flight request instead of each firing their own login
+// attempt. This is what was actually causing the rate-limit hits — not
+// repeated attempts over time, but several simultaneous ones on page load.
+const pendingAuth: Partial<Record<Env, Promise<string>>> = {};
 
 function getCreds() {
   const {
@@ -74,28 +81,42 @@ export async function getAccessToken(env: Env): Promise<string> {
     );
   }
 
-  const creds = getCreds();
-  const res = await fetch(`${baseUrl(env)}/auth/accesstokenrequest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(creds),
-  });
-
-  const body = await res.json().catch(() => ({}));
-
-  if (!res.ok || !body.accessToken) {
-    const errorMsg = `Tradovate auth failed (${env}): ${res.status} ${JSON.stringify(body)}`;
-    failureCache[env] = { error: errorMsg, retryAfter: Date.now() + FAILURE_COOLDOWN_MS };
-    throw new Error(errorMsg);
+  const existingRequest = pendingAuth[env];
+  if (existingRequest) {
+    return existingRequest;
   }
 
-  delete failureCache[env];
-  const expiresAt = body.expirationTime
-    ? new Date(body.expirationTime).getTime()
-    : Date.now() + 60 * 60 * 1000;
+  const requestPromise = (async () => {
+    const creds = getCreds();
+    const res = await fetch(`${baseUrl(env)}/auth/accesstokenrequest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(creds),
+    });
 
-  tokenCache[env] = { token: body.accessToken, expiresAt };
-  return body.accessToken;
+    const body = await res.json().catch(() => ({}));
+
+    if (!res.ok || !body.accessToken) {
+      const errorMsg = `Tradovate auth failed (${env}): ${res.status} ${JSON.stringify(body)}`;
+      failureCache[env] = { error: errorMsg, retryAfter: Date.now() + FAILURE_COOLDOWN_MS };
+      throw new Error(errorMsg);
+    }
+
+    delete failureCache[env];
+    const expiresAt = body.expirationTime
+      ? new Date(body.expirationTime).getTime()
+      : Date.now() + 60 * 60 * 1000;
+
+    tokenCache[env] = { token: body.accessToken, expiresAt };
+    return body.accessToken;
+  })();
+
+  pendingAuth[env] = requestPromise;
+  try {
+    return await requestPromise;
+  } finally {
+    delete pendingAuth[env];
+  }
 }
 
 async function tradovateFetch(env: Env, path: string, options: RequestInit = {}) {
