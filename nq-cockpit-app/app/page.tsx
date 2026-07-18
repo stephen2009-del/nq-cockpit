@@ -444,6 +444,21 @@ function PreMarketTab({
   const qqqHigh = valid ? qqq + qqqMove! : null;
   const qqqLow = valid ? qqq - qqqMove! : null;
 
+  const [ladderRange, setLadderRange] = useState("20");
+  const [ladderStep, setLadderStep] = useState("1");
+  const rangeNum = parseFloat(ladderRange) || 20;
+  const stepNum = parseFloat(ladderStep) || 1;
+
+  const ladderRows: { qqq: number; nq: number; isAnchor: boolean }[] = [];
+  if (valid && stepNum > 0) {
+    const start = Math.ceil((qqq - rangeNum) / stepNum) * stepNum;
+    const end = qqq + rangeNum;
+    for (let level = end; level >= start - 0.0001; level -= stepNum) {
+      const rounded = Math.round(level * 100) / 100;
+      ladderRows.push({ qqq: rounded, nq: rounded * mult, isAnchor: Math.abs(rounded - qqq) < stepNum / 2 });
+    }
+  }
+
   return (
     <>
       <div className="panel-box">
@@ -472,6 +487,40 @@ function PreMarketTab({
           </div>
         )}
       </div>
+
+      {valid && (
+        <div className="panel-box">
+          <div className="panel-title">QQQ / NQ Price Ladder</div>
+          <div className="panel-desc">Every QQQ level around today's price, mapped to its NQ equivalent.</div>
+          <div className="grid2" style={{ marginBottom: 16 }}>
+            <div className="field"><label>Range (± QQQ points)</label>
+              <input type="number" step="1" value={ladderRange} onChange={(e) => setLadderRange(e.target.value)} />
+            </div>
+            <div className="field"><label>Step (QQQ points)</label>
+              <input type="number" step="0.5" value={ladderStep} onChange={(e) => setLadderStep(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ maxHeight: 420, overflowY: "auto", overflowX: "auto" }}>
+            <table>
+              <thead style={{ position: "sticky", top: 0, background: "var(--panel)" }}>
+                <tr><th>QQQ</th><th>NQ</th></tr>
+              </thead>
+              <tbody>
+                {ladderRows.map((row) => (
+                  <tr key={row.qqq} style={row.isAnchor ? { background: "rgba(245,166,35,0.12)" } : undefined}>
+                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
+                      {row.qqq.toFixed(2)}{row.isAnchor ? "  ← today" : ""}
+                    </td>
+                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
+                      {row.nq.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="panel-box">
         <div className="panel-title">Recent Prep History</div>
