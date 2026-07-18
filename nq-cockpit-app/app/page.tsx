@@ -31,6 +31,58 @@ function escapeHtml(str: string | null | undefined) {
   return str || "";
 }
 
+function groupBy(trades: Trade[], keyFn: (t: Trade) => string) {
+  const map = new Map<string, Trade[]>();
+  trades.forEach((t) => {
+    const k = keyFn(t) || "(none)";
+    if (!map.has(k)) map.set(k, []);
+    map.get(k)!.push(t);
+  });
+  return Array.from(map.entries())
+    .map(([key, group]) => {
+      const pnl = group.reduce((s, t) => s + t.pnl, 0);
+      const wins = group.filter((t) => t.pnl > 0).length;
+      return {
+        key,
+        count: group.length,
+        pnl,
+        avgPnl: pnl / group.length,
+        winRate: Math.round((wins / group.length) * 100),
+      };
+    })
+    .sort((a, b) => b.pnl - a.pnl);
+}
+
+function downloadTradesCSV(trades: Trade[]) {
+  const headers = ["Date", "Symbol", "Direction", "Session", "Entry", "Exit", "Size", "PnL", "Setup", "Emotion", "Disciplined", "Notes"];
+  const rows = trades.map((t) => [
+    new Date(t.date).toISOString(),
+    t.symbol,
+    t.dir,
+    t.session,
+    t.entry ?? "",
+    t.exit ?? "",
+    t.size ?? "",
+    t.pnl,
+    t.setup ?? "",
+    t.emotion ?? "",
+    t.disciplined ? "CLEAN" : "FLAGGED",
+    (t.notes ?? "").replace(/"/g, '""'),
+  ]);
+  const csv = [headers, ...rows]
+    .map((row) => row.map((cell) => `"${String(cell)}"`).join(","))
+    .join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `nq-cockpit-trades-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export default function Page() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -362,10 +414,17 @@ function Dashboard({ trades }: { trades: Trade[] }) {
   const last = points[points.length - 1];
   const curveColor = last >= 0 ? "var(--cyan)" : "var(--red)";
 
+  const sessionStats = groupBy(trades, (t) => t.session);
+  const setupStats = groupBy(trades, (t) => t.setup || "(none)");
+  const emotionStats = groupBy(trades, (t) => t.emotion || "(none)");
+
   return (
     <>
       <div className="panel-box">
-        <div className="panel-title">Performance Summary</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div className="panel-title" style={{ margin: 0 }}>Performance Summary</div>
+          <button className="btn small ghost" onClick={() => downloadTradesCSV(trades)}>Export CSV</button>
+        </div>
         <div className="stat-grid">
           <div className="stat-box"><div className={`stat-num ${totalPnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(totalPnl)}</div><div className="stat-lbl">Total P&amp;L</div></div>
           <div className="stat-box"><div className="stat-num">{winRate}%</div><div className="stat-lbl">Win Rate</div></div>
@@ -396,7 +455,102 @@ function Dashboard({ trades }: { trades: Trade[] }) {
           <CompareRow label="Flagged win rate" value={flagWinRate} max={100} color="var(--amber)" display={`${flagWinRate}%`} />
         </div>
       </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Calendar</div>
+        <div className="panel-desc">Daily P&amp;L over the last 5 weeks.</div>
+        <CalendarHeatmap trades={trades} />
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">By Session</div>
+        <BreakdownTable stats={sessionStats} />
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">By Setup</div>
+        <BreakdownTable stats={setupStats} />
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">By Emotional State</div>
+        <BreakdownTable stats={emotionStats} />
+      </div>
     </>
+  );
+}
+
+function BreakdownTable({ stats }: { stats: { key: string; count: number; pnl: number; avgPnl: number; winRate: number }[] }) {
+  if (stats.length === 0) return <div className="empty-state">No data yet.</div>;
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Trades</th><th>Total P&amp;L</th><th>Avg P&amp;L</th><th>Win Rate</th></tr>
+        </thead>
+        <tbody>
+          {stats.map((s) => (
+            <tr key={s.key}>
+              <td>{s.key}</td>
+              <td>{s.count}</td>
+              <td className={s.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(s.pnl)}</td>
+              <td className={s.avgPnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(s.avgPnl)}</td>
+              <td>{s.winRate}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CalendarHeatmap({ trades }: { trades: Trade[] }) {
+  const days = 35;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const cells: { date: Date; pnl: number; count: number }[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const dayTrades = trades.filter((t) => {
+      const td = new Date(t.date);
+      return td.toDateString() === d.toDateString();
+    });
+    cells.push({ date: d, pnl: dayTrades.reduce((s, t) => s + t.pnl, 0), count: dayTrades.length });
+  }
+  const maxAbsPnl = Math.max(...cells.map((c) => Math.abs(c.pnl)), 1);
+
+  function cellColor(pnl: number, count: number) {
+    if (count === 0) return "var(--panel-2)";
+    const intensity = Math.min(Math.abs(pnl) / maxAbsPnl, 1);
+    if (pnl > 0) return `rgba(63,208,201,${0.15 + intensity * 0.6})`;
+    if (pnl < 0) return `rgba(229,72,77,${0.15 + intensity * 0.6})`;
+    return "var(--panel-2)";
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+      {cells.map((c, i) => (
+        <div
+          key={i}
+          title={`${c.date.toLocaleDateString()} — ${c.count} trade(s), ${fmtMoney(c.pnl)}`}
+          style={{
+            aspectRatio: "1",
+            borderRadius: 4,
+            background: cellColor(c.pnl, c.count),
+            border: "1px solid var(--line)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 9,
+            fontFamily: "'IBM Plex Mono',monospace",
+            color: "var(--muted)",
+          }}
+        >
+          {c.date.getDate()}
+        </div>
+      ))}
+    </div>
   );
 }
 

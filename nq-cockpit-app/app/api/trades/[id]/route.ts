@@ -3,9 +3,8 @@ import { prisma } from "@/lib/prisma";
 
 export async function DELETE(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: { id: string } }
 ) {
-  const { id } = await params;
-  await prisma.trade.delete({ where: { id: parseInt(id) } });
+  await prisma.trade.delete({ where: { id: parseInt(params.id) } });
   return NextResponse.json({ ok: true });
 }
