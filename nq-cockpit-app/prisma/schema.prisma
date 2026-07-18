@@ -89,3 +89,10 @@ model TradeLockout {
   until     DateTime
   reason    String
 }
+
+model EmotionalLogEntry {
+  id   Int      @id @default(autoincrement())
+  date DateTime @default(now())
+  tag  String?
+  note String
+}

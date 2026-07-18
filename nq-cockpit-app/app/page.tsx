@@ -36,6 +36,7 @@ type Settings = {
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
 type IntradayCheckT = { id: number; date: string; qqqPrice: number; nqPrice: number };
+type EmotionalEntry = { id: number; date: string; tag: string | null; note: string };
 
 const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
 
@@ -118,12 +119,14 @@ export default function Page() {
     tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo",
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"premarket" | "intraday" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
+  const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
   const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
   const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "", openInterestNotes: "" });
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
   const [oiForm, setOiForm] = useState({ strike: "", oi: "", note: "" });
   const [intradayChecks, setIntradayChecks] = useState<IntradayCheckT[]>([]);
+  const [emoEntries, setEmoEntries] = useState<EmotionalEntry[]>([]);
+  const [emoForm, setEmoForm] = useState({ tag: "", note: "" });
   const [intradayInput, setIntradayInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
@@ -137,13 +140,14 @@ export default function Page() {
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3, r4, r5, r6] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
       fetch("/api/premarket").then((r) => r.json()),
       fetch("/api/oi-levels").then((r) => r.json()),
       fetch("/api/intraday").then((r) => r.json()),
+      fetch("/api/emotional-log").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -155,6 +159,7 @@ export default function Page() {
     setPreMarketHistory(r4);
     setOiLevels(r5);
     setIntradayChecks(r6);
+    setEmoEntries(r7);
     const today = new Date().toDateString();
     const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
     if (todayEntry) {
@@ -270,6 +275,19 @@ export default function Page() {
     setPreMarketHistory((h) => [saved, ...h.filter((p) => p.id !== saved.id)]);
   }
 
+  async function addEmoEntry() {
+    if (!emoForm.note.trim()) {
+      alert("Write something first.");
+      return;
+    }
+    const entry = await fetch("/api/emotional-log", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag: emoForm.tag, note: emoForm.note }),
+    }).then((r) => r.json());
+    setEmoEntries((e) => [entry, ...e]);
+    setEmoForm({ tag: "", note: "" });
+  }
+
   async function addIntradayCheck() {
     const qqqPrice = parseFloat(intradayInput);
     if (isNaN(qqqPrice)) {
@@ -353,9 +371,9 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["premarket", "intraday", "tradeticket", "tvanalytics", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
+        {(["premarket", "intraday", "emojournal", "tradeticket", "tvanalytics", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t === "tradeticket" ? "Trade Ticket" : t === "tvanalytics" ? "TV Analytics" : t}
+            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t === "tradeticket" ? "Trade Ticket" : t === "tvanalytics" ? "TV Analytics" : t === "emojournal" ? "Emotional Journal" : t}
           </button>
         ))}
       </div>
@@ -364,6 +382,7 @@ export default function Page() {
 
       {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
       {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} />}
+      {tab === "emojournal" && <EmotionalJournalTab form={emoForm} setForm={setEmoForm} onSave={addEmoEntry} entries={emoEntries} />}
 
       {tab === "intraday" && (
         <IntradayTab
@@ -893,6 +912,72 @@ ${svg}
 </body></html>`;
 
   downloadHtmlReport(html, `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
+}
+
+const EMO_TAGS = ["Calm", "Confident", "Anxious", "FOMO", "Doubt", "Overconfident", "Tilted / Revenge", "Fear of losing gains", "Impatient", "Bored"];
+
+function EmotionalJournalTab({
+  form,
+  setForm,
+  onSave,
+  entries,
+}: {
+  form: { tag: string; note: string };
+  setForm: (f: { tag: string; note: string }) => void;
+  onSave: () => void;
+  entries: EmotionalEntry[];
+}) {
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Log What's In Your Head</div>
+        <div className="panel-desc">
+          While you're in a trade, the thoughts racing through your head are the actual data. Tag it if one fits,
+          then just write — this isn't for polished reflection, it's for catching yourself in the moment.
+        </div>
+        <div className="rule-toggle-list" style={{ marginBottom: 14 }}>
+          {EMO_TAGS.map((t) => (
+            <span
+              key={t}
+              className={`mini-tag ${form.tag === t ? "on" : ""}`}
+              style={{ cursor: "pointer", ...(form.tag === t ? { borderColor: "var(--cyan)", color: "var(--cyan)", background: "rgba(63,208,201,0.1)" } : {}) }}
+              onClick={() => setForm({ ...form, tag: form.tag === t ? "" : t })}
+            >
+              {t}
+            </span>
+          ))}
+        </div>
+        <div className="field">
+          <textarea
+            value={form.note}
+            onChange={(e) => setForm({ ...form, note: e.target.value })}
+            placeholder="e.g. 'Down 2 points and already thinking about moving my stop. Feels like it's about to reverse but I have no real reason to think that.'"
+            style={{ minHeight: 100 }}
+          />
+        </div>
+        <button className="btn primary" onClick={onSave}>Log Entry</button>
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Recent Entries</div>
+        {entries.length === 0 ? (
+          <div className="empty-state"><div className="big">🧠</div>Nothing logged yet. Next time you're mid-trade and your head is loud, write it down here.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {entries.map((e) => (
+              <div key={e.id} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 14px", background: "var(--panel-2)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span className="card-sub" style={{ marginTop: 0 }}>{new Date(e.date).toLocaleString()}</span>
+                  {e.tag && <span className="mini-tag on" style={{ borderColor: "var(--cyan)", color: "var(--cyan)" }}>{e.tag}</span>}
+                </div>
+                <div style={{ fontSize: 13.5, whiteSpace: "pre-wrap" }}>{e.note}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
 }
 
 function IntradayTab({
