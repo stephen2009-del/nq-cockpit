@@ -20,6 +20,7 @@ type Trade = {
   checklistSnapshot: { rule: string; passed: boolean }[];
 };
 type Settings = { id: number; dailyLossLimit: number; contract: string; multiplier: number };
+type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number };
 
 const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
 
@@ -88,7 +89,9 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({ id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20 });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"checklist" | "journal" | "dashboard" | "settings">("checklist");
+  const [tab, setTab] = useState<"premarket" | "checklist" | "journal" | "dashboard" | "settings">("premarket");
+  const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
+  const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "" });
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
   const [newRuleText, setNewRuleText] = useState("");
@@ -101,10 +104,11 @@ export default function Page() {
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3] = await Promise.all([
+    const [r1, r2, r3, r4] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
+      fetch("/api/premarket").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -113,6 +117,16 @@ export default function Page() {
     const c: Record<number, boolean> = {};
     r1.forEach((rule: Rule) => (c[rule.id] = false));
     setChecked(c);
+    setPreMarketHistory(r4);
+    const today = new Date().toDateString();
+    const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
+    if (todayEntry) {
+      setPreMarketForm({
+        qqqPrice: String(todayEntry.qqqPrice),
+        multiplier: String(todayEntry.multiplier),
+        estimatedMove: String(todayEntry.estimatedMove),
+      });
+    }
     setLoading(false);
   }
 
@@ -203,6 +217,21 @@ export default function Page() {
     alert("Settings saved.");
   }
 
+  async function savePreMarket() {
+    const qqqPrice = parseFloat(preMarketForm.qqqPrice);
+    const multiplier = parseFloat(preMarketForm.multiplier);
+    const estimatedMove = parseFloat(preMarketForm.estimatedMove);
+    if (isNaN(qqqPrice) || isNaN(multiplier) || isNaN(estimatedMove)) {
+      alert("Fill in QQQ price, multiplier, and estimated move.");
+      return;
+    }
+    const saved = await fetch("/api/premarket", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ qqqPrice, multiplier, estimatedMove }),
+    }).then((r) => r.json());
+    setPreMarketHistory((h) => [saved, ...h.filter((p) => p.id !== saved.id)]);
+  }
+
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
   return (
@@ -244,14 +273,23 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["checklist", "journal", "dashboard", "settings"] as const).map((t) => (
+        {(["premarket", "checklist", "journal", "dashboard", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "checklist" ? "Pre-Trade" : t}
+            {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t}
           </button>
         ))}
       </div>
 
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
+
+      {tab === "premarket" && (
+        <PreMarketTab
+          form={preMarketForm}
+          setForm={setPreMarketForm}
+          onSave={savePreMarket}
+          history={preMarketHistory}
+        />
+      )}
 
       {tab === "checklist" && (
         <>
@@ -381,6 +419,116 @@ function Dial({ score, color }: { score: number | null; color: string }) {
         strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
         transform="rotate(-90 32 32)" style={{ transition: "stroke-dashoffset .4s" }} />
     </svg>
+  );
+}
+
+function PreMarketTab({
+  form,
+  setForm,
+  onSave,
+  history,
+}: {
+  form: { qqqPrice: string; multiplier: string; estimatedMove: string };
+  setForm: (f: { qqqPrice: string; multiplier: string; estimatedMove: string }) => void;
+  onSave: () => void;
+  history: PreMarketPrep[];
+}) {
+  const qqq = parseFloat(form.qqqPrice);
+  const mult = parseFloat(form.multiplier);
+  const move = parseFloat(form.estimatedMove);
+  const valid = !isNaN(qqq) && !isNaN(mult) && !isNaN(move);
+  const nqPrice = valid ? qqq * mult : null;
+  const nqHigh = valid ? nqPrice! + move : null;
+  const nqLow = valid ? nqPrice! - move : null;
+  const qqqMove = valid ? move / mult : null;
+  const qqqHigh = valid ? qqq + qqqMove! : null;
+  const qqqLow = valid ? qqq - qqqMove! : null;
+
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Pre-Market Prep</div>
+        <div className="panel-desc">Enter today's QQQ price, the NQ/QQQ multiplier, and your estimated move. NQ price is calculated for you.</div>
+        <div className="grid3">
+          <div className="field"><label>QQQ Price</label>
+            <input type="number" step="0.01" value={form.qqqPrice} onChange={(e) => setForm({ ...form, qqqPrice: e.target.value })} placeholder="e.g. 512.30" />
+          </div>
+          <div className="field"><label>NQ/QQQ Multiplier</label>
+            <input type="number" step="0.01" value={form.multiplier} onChange={(e) => setForm({ ...form, multiplier: e.target.value })} placeholder="e.g. 41.36" />
+          </div>
+          <div className="field"><label>Estimated Move (NQ points)</label>
+            <input type="number" step="1" value={form.estimatedMove} onChange={(e) => setForm({ ...form, estimatedMove: e.target.value })} placeholder="e.g. 180" />
+          </div>
+        </div>
+        <button className="btn primary" onClick={onSave} disabled={!valid}>Save Today's Prep</button>
+
+        {valid && (
+          <div style={{ marginTop: 24 }}>
+            <div className="card-label" style={{ marginBottom: 12 }}>CALCULATED NQ PRICE</div>
+            <div className="dial-num" style={{ color: "var(--cyan)", marginBottom: 20 }}>{nqPrice!.toFixed(2)}</div>
+            <RangeBar label="NQ" low={nqLow!} mid={nqPrice!} high={nqHigh!} />
+            <div style={{ height: 16 }} />
+            <RangeBar label="QQQ" low={qqqLow!} mid={qqq} high={qqqHigh!} />
+          </div>
+        )}
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Recent Prep History</div>
+        {history.length === 0 ? (
+          <div className="empty-state">No prep logged yet.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead><tr><th>Date</th><th>QQQ</th><th>Multiplier</th><th>NQ (calc)</th><th>Est. Move</th></tr></thead>
+              <tbody>
+                {history.map((p) => (
+                  <tr key={p.id}>
+                    <td>{new Date(p.date).toLocaleDateString()}</td>
+                    <td>{p.qqqPrice.toFixed(2)}</td>
+                    <td>{p.multiplier}</td>
+                    <td>{p.nqPrice.toFixed(2)}</td>
+                    <td>±{p.estimatedMove}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function RangeBar({ label, low, mid, high }: { label: string; low: number; mid: number; high: number }) {
+  const pct = ((mid - low) / (high - low)) * 100;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+        <span className="card-label">{label} PROJECTED RANGE</span>
+        <span className="card-sub">{low.toFixed(2)} — {high.toFixed(2)}</span>
+      </div>
+      <div style={{ position: "relative", height: 10, background: "var(--panel-2)", borderRadius: 5, border: "1px solid var(--line)" }}>
+        <div
+          style={{
+            position: "absolute",
+            left: `calc(${pct}% - 6px)`,
+            top: -5,
+            width: 12,
+            height: 20,
+            borderRadius: 3,
+            background: "var(--amber)",
+            border: "2px solid var(--bg)",
+          }}
+          title={`${label}: ${mid.toFixed(2)}`}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11, color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace" }}>
+        <span>LOW {low.toFixed(2)}</span>
+        <span style={{ color: "var(--amber)" }}>ANCHOR {mid.toFixed(2)}</span>
+        <span>HIGH {high.toFixed(2)}</span>
+      </div>
+    </div>
   );
 }
 

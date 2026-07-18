@@ -37,3 +37,12 @@ model Settings {
   contract       String @default("NQ")
   multiplier     Float  @default(20)
 }
+
+model PreMarketPrep {
+  id            Int      @id @default(autoincrement())
+  date          DateTime @default(now())
+  qqqPrice      Float
+  multiplier    Float
+  estimatedMove Float
+  nqPrice       Float
+}
