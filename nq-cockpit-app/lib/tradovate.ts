@@ -140,6 +140,62 @@ export async function getCashBalance(env: Env, accountId: number) {
   return result;
 }
 
+// Resolves a root symbol ("NQ", "MNQ") to the actual current front-month
+// contract Tradovate is quoting (e.g. "NQZ5"). Tries their suggest endpoint
+// first (used by their own UI's symbol search), falls back to filtering the
+// full contract list by name prefix + nearest expiration.
+// NOT tested against live data — if this picks the wrong contract, check the
+// `candidates` field in the response for what it actually saw.
+export async function findFrontMonthContract(env: Env, root: string) {
+  const suggest = await tradovateFetch(env, `/contract/suggest?t=${encodeURIComponent(root)}&l=20`);
+  let candidates: any[] = suggest.ok && Array.isArray(suggest.body) ? suggest.body : [];
+
+  if (candidates.length === 0) {
+    const list = await tradovateFetch(env, "/contract/list");
+    if (list.ok && Array.isArray(list.body)) {
+      candidates = list.body.filter((c: any) =>
+        typeof c.name === "string" && c.name.toUpperCase().startsWith(root.toUpperCase())
+      );
+    }
+  }
+
+  // Exact-prefix match only (avoid "NQ" matching "MNQ" contracts, etc.)
+  candidates = candidates.filter((c: any) => {
+    const name = (c.name || "").toUpperCase();
+    const r = root.toUpperCase();
+    // strip trailing month-code + year digits (e.g. "NQZ5" -> "NQ")
+    const base = name.replace(/[FGHJKMNQUVXZ]\d{1,2}$/, "");
+    return base === r;
+  });
+
+  if (candidates.length === 0) {
+    return { ok: false, symbol: null, candidates: [], error: `No contracts found matching root "${root}"` };
+  }
+
+  const withExpiry = await Promise.all(
+    candidates.map(async (c: any) => {
+      if (c.expirationDate) return { ...c, _expiry: new Date(c.expirationDate).getTime() };
+      if (c.maturityId) {
+        const maturity = await tradovateFetch(env, `/contractMaturity/item?id=${c.maturityId}`);
+        const exp = maturity.ok ? maturity.body.expirationDate : null;
+        return { ...c, _expiry: exp ? new Date(exp).getTime() : Infinity };
+      }
+      return { ...c, _expiry: Infinity };
+    })
+  );
+
+  const now = Date.now();
+  const future = withExpiry.filter((c) => c._expiry > now).sort((a, b) => a._expiry - b._expiry);
+  const chosen = future[0] || withExpiry.sort((a, b) => a._expiry - b._expiry)[0];
+
+  return {
+    ok: true,
+    symbol: chosen?.name || null,
+    expiration: chosen?._expiry && chosen._expiry !== Infinity ? new Date(chosen._expiry).toISOString() : null,
+    candidates: withExpiry.map((c) => c.name),
+  };
+}
+
 // Finds the open position (if any) matching a given symbol for an account.
 // Tradovate's /position/list returns positions keyed by contractId, not the
 // text symbol, so this resolves each position's contract name to compare.

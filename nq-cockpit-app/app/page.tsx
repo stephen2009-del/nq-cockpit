@@ -897,9 +897,12 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [windowStatus, setWindowStatus] = useState(() => getTradingWindowStatus(settings));
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
-  const [form, setForm] = useState({ accountId: "", symbol: "", action: "Buy", qty: "1", orderType: "Market", price: "" });
+  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
+  const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
 
   useEffect(() => {
     const interval = setInterval(() => setWindowStatus(getTradingWindowStatus(settings)), 15000);
@@ -913,11 +916,38 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       .then((d) => setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error }))
       .catch((e) => setConnStatus({ connected: false, accounts: null, error: String(e) }));
     fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
+
+    // pull the most recent known NQ price (Intraday check today, falling back
+    // to today's Pre-Market prep) to prefill the limit price field — this is
+    // NOT a live quote, just whatever you last logged in this app
+    Promise.all([
+      fetch("/api/intraday").then((r) => r.json()),
+      fetch("/api/premarket").then((r) => r.json()),
+    ]).then(([checks, prep]) => {
+      const latestCheck = checks[checks.length - 1];
+      const todayPrep = prep.find((p: PreMarketPrep) => new Date(p.date).toDateString() === new Date().toDateString());
+      setLastKnownPrice(latestCheck?.nqPrice ?? todayPrep?.nqPrice ?? null);
+    });
   }, [settings.tradovateEnv]);
 
+  useEffect(() => {
+    setResolvedSymbol(null);
+    if (!form.root) return;
+    setResolving(true);
+    fetch(`/api/tradovate/resolve-symbol?env=${settings.tradovateEnv}&root=${form.root}`)
+      .then((r) => r.json())
+      .then((d) => setResolvedSymbol(d.ok ? { symbol: d.symbol, expiration: d.expiration } : { symbol: null, expiration: null, error: d.error }))
+      .catch((e) => setResolvedSymbol({ symbol: null, expiration: null, error: String(e) }))
+      .finally(() => setResolving(false));
+  }, [form.root, settings.tradovateEnv]);
+
+  function useLimitOrder() {
+    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPrice !== null ? String(lastKnownPrice) : f.price }));
+  }
+
   async function submitOrder() {
-    if (!form.accountId || !form.symbol || !form.qty) {
-      alert("Fill in account, symbol, and quantity.");
+    if (!form.accountId || !resolvedSymbol?.symbol || !form.qty) {
+      alert("Fill in account and quantity, and make sure a contract has resolved.");
       return;
     }
     setSubmitting(true);
@@ -929,7 +959,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         body: JSON.stringify({
           env: settings.tradovateEnv,
           accountId: form.accountId,
-          symbol: form.symbol,
+          symbol: resolvedSymbol.symbol,
           action: form.action,
           orderQty: form.qty,
           orderType: form.orderType,
@@ -979,8 +1009,11 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
               ))}
             </select>
           </div>
-          <div className="field"><label>Symbol</label>
-            <input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} placeholder="e.g. NQZ5 (exact contract)" />
+          <div className="field"><label>Symbol (root)</label>
+            <select value={form.root} onChange={(e) => setForm({ ...form, root: e.target.value })}>
+              <option value="NQ">NQ</option>
+              <option value="MNQ">MNQ</option>
+            </select>
           </div>
           <div className="field"><label>Side</label>
             <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
@@ -989,6 +1022,15 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             </select>
           </div>
         </div>
+
+        <div className="status-banner" style={{ marginTop: 4, marginBottom: 12, background: resolvedSymbol?.symbol ? "rgba(63,208,201,0.1)" : "rgba(245,166,35,0.1)", borderColor: resolvedSymbol?.symbol ? "var(--cyan-dim)" : "var(--amber-dim)", color: resolvedSymbol?.symbol ? "var(--cyan)" : "var(--amber)" }}>
+          {resolving
+            ? "Resolving front-month contract…"
+            : resolvedSymbol?.symbol
+            ? `✓ Resolved to ${resolvedSymbol.symbol}${resolvedSymbol.expiration ? ` (expires ${new Date(resolvedSymbol.expiration).toLocaleDateString()})` : ""}`
+            : `⚠ Could not resolve a contract for ${form.root}: ${resolvedSymbol?.error || "unknown error"}`}
+        </div>
+
         <div className="grid3">
           <div className="field"><label>Quantity</label>
             <input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} />
@@ -1002,12 +1044,22 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           {form.orderType === "Limit" && (
             <div className="field"><label>Limit Price</label>
               <input type="number" step="0.25" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} />
+              <div className="card-sub" style={{ marginTop: 4 }}>
+                {lastKnownPrice !== null
+                  ? `Prefilled from your last logged price (${lastKnownPrice.toFixed(2)}) — not a live quote. Adjust as needed.`
+                  : "No recent price logged in Pre-Market/Intraday — enter manually."}
+              </div>
             </div>
           )}
         </div>
+        {form.orderType === "Market" && lastKnownPrice !== null && (
+          <button className="btn small ghost" onClick={useLimitOrder} style={{ marginBottom: 12 }}>
+            Switch to Limit @ last known price ({lastKnownPrice.toFixed(2)})
+          </button>
+        )}
 
-        <button className="btn primary" onClick={submitOrder} disabled={submitting || !windowStatus.allowed}>
-          {submitting ? "Submitting…" : !windowStatus.allowed ? "Blocked — outside trading window" : "Submit Order"}
+        <button className="btn primary" onClick={submitOrder} disabled={submitting || !windowStatus.allowed || resolving || !resolvedSymbol?.symbol}>
+          {submitting ? "Submitting…" : !windowStatus.allowed ? "Blocked — outside trading window" : resolving ? "Resolving contract…" : !resolvedSymbol?.symbol ? "No contract resolved" : "Submit Order"}
         </button>
 
         {result && (
