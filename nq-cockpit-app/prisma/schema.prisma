@@ -55,3 +55,10 @@ model OpenInterestLevel {
   oi     Float
   note   String?
 }
+
+model IntradayCheck {
+  id       Int      @id @default(autoincrement())
+  date     DateTime @default(now())
+  qqqPrice Float
+  nqPrice  Float
+}

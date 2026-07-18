@@ -23,6 +23,7 @@ type Trade = {
 type Settings = { id: number; dailyLossLimit: number; contract: string; multiplier: number };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
+type IntradayCheckT = { id: number; date: string; qqqPrice: number; nqPrice: number };
 
 const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
 
@@ -91,11 +92,13 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({ id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20 });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
-  const [tab, setTab] = useState<"premarket" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
+  const [tab, setTab] = useState<"premarket" | "intraday" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
   const [preMarketHistory, setPreMarketHistory] = useState<PreMarketPrep[]>([]);
   const [preMarketForm, setPreMarketForm] = useState({ qqqPrice: "", multiplier: "41.36", estimatedMove: "", openInterestNotes: "" });
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
   const [oiForm, setOiForm] = useState({ strike: "", oi: "", note: "" });
+  const [intradayChecks, setIntradayChecks] = useState<IntradayCheckT[]>([]);
+  const [intradayInput, setIntradayInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
   const [newRuleText, setNewRuleText] = useState("");
@@ -108,12 +111,13 @@ export default function Page() {
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3, r4, r5] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
       fetch("/api/premarket").then((r) => r.json()),
       fetch("/api/oi-levels").then((r) => r.json()),
+      fetch("/api/intraday").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -124,6 +128,7 @@ export default function Page() {
     setChecked(c);
     setPreMarketHistory(r4);
     setOiLevels(r5);
+    setIntradayChecks(r6);
     const today = new Date().toDateString();
     const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
     if (todayEntry) {
@@ -239,6 +244,25 @@ export default function Page() {
     setPreMarketHistory((h) => [saved, ...h.filter((p) => p.id !== saved.id)]);
   }
 
+  async function addIntradayCheck() {
+    const qqqPrice = parseFloat(intradayInput);
+    if (isNaN(qqqPrice)) {
+      alert("Enter a QQQ price.");
+      return;
+    }
+    const multiplier = parseFloat(preMarketForm.multiplier);
+    if (isNaN(multiplier)) {
+      alert("Enter today's NQ/QQQ multiplier on the Pre-Market tab first.");
+      return;
+    }
+    const check = await fetch("/api/intraday", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ qqqPrice, multiplier }),
+    }).then((r) => r.json());
+    setIntradayChecks((c) => [...c, check]);
+    setIntradayInput("");
+  }
+
   async function addOiLevel() {
     const strike = parseFloat(oiForm.strike);
     const oi = parseFloat(oiForm.oi);
@@ -303,7 +327,7 @@ export default function Page() {
       </div>
 
       <div className="tabs">
-        {(["premarket", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
+        {(["premarket", "intraday", "checklist", "journal", "dashboard", "reports", "settings"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t === "checklist" ? "Pre-Trade" : t === "premarket" ? "Pre-Market" : t}
           </button>
@@ -311,6 +335,17 @@ export default function Page() {
       </div>
 
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
+
+      {tab === "intraday" && (
+        <IntradayTab
+          input={intradayInput}
+          setInput={setIntradayInput}
+          onCheck={addIntradayCheck}
+          checks={intradayChecks}
+          todayPrep={preMarketHistory.find((p) => new Date(p.date).toDateString() === new Date().toDateString()) || null}
+          oiLevels={oiLevels}
+        />
+      )}
 
       {tab === "premarket" && (
         <PreMarketTab
@@ -668,6 +703,162 @@ function RangeBar({ label, low, mid, high }: { label: string; low: number; mid: 
         <span>HIGH {high.toFixed(2)}</span>
       </div>
     </div>
+  );
+}
+
+type Observation = { level: "info" | "warning" | "critical"; text: string };
+
+function buildObservations(
+  currentQqq: number,
+  prep: PreMarketPrep | null,
+  oiLevels: OILevel[],
+  checks: IntradayCheckT[]
+): Observation[] {
+  const obs: Observation[] = [];
+
+  if (!prep) {
+    obs.push({ level: "info", text: "No Pre-Market prep logged today — log QQQ price + estimated move on the Pre-Market tab for range context." });
+  } else {
+    const moveFromAnchor = currentQqq - prep.qqqPrice;
+    const pct = (Math.abs(moveFromAnchor) / prep.estimatedMove) * 100;
+    const dir = moveFromAnchor >= 0 ? "up" : "down";
+    if (pct >= 100) {
+      obs.push({
+        level: "critical",
+        text: `Price has moved ${Math.abs(moveFromAnchor).toFixed(2)} QQQ pts ${dir} from this morning's anchor (${prep.qqqPrice.toFixed(2)}) — ${pct.toFixed(0)}% of your estimated move, already exceeded. This is now outside your normal-day scenario.`,
+      });
+    } else if (pct >= 70) {
+      obs.push({
+        level: "warning",
+        text: `Nearing your estimated move — ${pct.toFixed(0)}% used (${Math.abs(moveFromAnchor).toFixed(2)} of ${prep.estimatedMove} QQQ pts, moving ${dir}).`,
+      });
+    } else if (pct >= 30) {
+      obs.push({ level: "info", text: `${pct.toFixed(0)}% of today's estimated move used so far (${dir}).` });
+    } else {
+      obs.push({ level: "info", text: `Within normal range — only ${pct.toFixed(0)}% of estimated move used.` });
+    }
+  }
+
+  const todayLevels = oiLevels.filter((l) => new Date(l.date).toDateString() === new Date().toDateString());
+  todayLevels.forEach((level) => {
+    const distance = Math.abs(currentQqq - level.strike);
+    if (distance <= 2) {
+      obs.push({
+        level: "warning",
+        text: `Within ${distance.toFixed(2)} pts of logged OI level ${level.strike} (OI ${level.oi.toLocaleString()})${level.note ? " — " + level.note : ""}.`,
+      });
+    }
+  });
+
+  if (checks.length > 0) {
+    const last = checks[checks.length - 1];
+    const timeDiffMin = (Date.now() - new Date(last.date).getTime()) / 60000;
+    if (timeDiffMin > 0 && timeDiffMin <= 60) {
+      const nqDelta = (currentQqq - last.qqqPrice) * (last.nqPrice / last.qqqPrice);
+      const rate = nqDelta / timeDiffMin;
+      if (Math.abs(rate) >= 5) {
+        obs.push({
+          level: "warning",
+          text: `Fast move detected: ${nqDelta >= 0 ? "+" : ""}${nqDelta.toFixed(1)} NQ pts in ${timeDiffMin.toFixed(0)} min since last check (~${rate.toFixed(1)} pts/min).`,
+        });
+      }
+    }
+  }
+
+  return obs;
+}
+
+function IntradayTab({
+  input,
+  setInput,
+  onCheck,
+  checks,
+  todayPrep,
+  oiLevels,
+}: {
+  input: string;
+  setInput: (v: string) => void;
+  onCheck: () => void;
+  checks: IntradayCheckT[];
+  todayPrep: PreMarketPrep | null;
+  oiLevels: OILevel[];
+}) {
+  const qqq = parseFloat(input);
+  const validInput = !isNaN(qqq);
+  const valid = validInput && !!todayPrep;
+  const multiplier = todayPrep?.multiplier ?? null;
+  const nqPrice = valid ? qqq * multiplier! : null;
+  const observations = valid ? buildObservations(qqq, todayPrep, oiLevels, checks) : [];
+
+  const anchorLow = todayPrep ? todayPrep.qqqPrice - todayPrep.estimatedMove : null;
+  const anchorHigh = todayPrep ? todayPrep.qqqPrice + todayPrep.estimatedMove : null;
+
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Intraday Check</div>
+        <div className="panel-desc">Punch in QQQ's current price any time during the day — NQ and today's observations update instantly.</div>
+        <div className="grid2">
+          <div className="field"><label>Current QQQ Price</label>
+            <input type="number" step="0.01" value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. 698.50" />
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button className="btn primary" onClick={onCheck} disabled={!validInput} style={{ width: "100%" }}>Log Check</button>
+          </div>
+        </div>
+
+        {validInput && !todayPrep && (
+          <div className="status-banner status-warn" style={{ marginTop: 16 }}>
+            ⚠ No Pre-Market prep logged today, so NQ can't be calculated yet. Go to the Pre-Market tab and log today's QQQ price + multiplier first.
+          </div>
+        )}
+
+        {valid && (
+          <div style={{ marginTop: 20 }}>
+            <div className="card-label">CALCULATED NQ PRICE</div>
+            <div className="dial-num" style={{ color: "var(--cyan)", marginBottom: 16 }}>{nqPrice!.toFixed(2)}</div>
+
+            {anchorLow !== null && anchorHigh !== null && (
+              <RangeBar label="QQQ vs. today's plan" low={anchorLow} mid={qqq} high={anchorHigh} />
+            )}
+
+            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+              {observations.map((o, i) => (
+                <div
+                  key={i}
+                  className={`status-banner ${o.level === "critical" ? "status-warn" : o.level === "warning" ? "status-warn" : "status-clear"}`}
+                  style={o.level === "critical" ? { borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" } : undefined}
+                >
+                  {o.level === "critical" ? "⚠ " : o.level === "warning" ? "⚠ " : "· "}{o.text}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Today's Checks</div>
+        {checks.length === 0 ? (
+          <div className="empty-state">No checks logged yet today.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead>
+              <tbody>
+                {[...checks].reverse().map((c) => (
+                  <tr key={c.id}>
+                    <td>{new Date(c.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                    <td>{c.qqqPrice.toFixed(2)}</td>
+                    <td>{c.nqPrice.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
