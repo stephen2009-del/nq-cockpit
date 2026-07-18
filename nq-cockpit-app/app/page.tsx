@@ -1,0 +1,439 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+type Rule = { id: number; text: string; order: number };
+type Trade = {
+  id: number;
+  date: string;
+  symbol: string;
+  dir: string;
+  session: string;
+  entry: number | null;
+  exit: number | null;
+  size: number | null;
+  pnl: number;
+  setup: string | null;
+  emotion: string | null;
+  notes: string | null;
+  disciplined: boolean;
+  checklistSnapshot: { rule: string; passed: boolean }[];
+};
+type Settings = { id: number; dailyLossLimit: number; contract: string; multiplier: number };
+
+const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
+
+function fmtMoney(n: number) {
+  const sign = n < 0 ? "-" : "";
+  return sign + "$" + Math.abs(n).toFixed(2);
+}
+function escapeHtml(str: string | null | undefined) {
+  return str || "";
+}
+
+export default function Page() {
+  const [rules, setRules] = useState<Rule[]>([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [settings, setSettings] = useState<Settings>({ id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20 });
+  const [checked, setChecked] = useState<Record<number, boolean>>({});
+  const [tab, setTab] = useState<"checklist" | "journal" | "dashboard" | "settings">("checklist");
+  const [loading, setLoading] = useState(true);
+  const [viewTradeId, setViewTradeId] = useState<number | null>(null);
+  const [newRuleText, setNewRuleText] = useState("");
+  const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
+
+  const [form, setForm] = useState({
+    symbol: "NQ", dir: "long", session: "NY Open", entry: "", exit: "", size: "1",
+    pnl: "", setup: "", emotion: "Calm / neutral", notes: "",
+  });
+
+  async function loadAll() {
+    setLoading(true);
+    const [r1, r2, r3] = await Promise.all([
+      fetch("/api/rules").then((r) => r.json()),
+      fetch("/api/trades").then((r) => r.json()),
+      fetch("/api/settings").then((r) => r.json()),
+    ]);
+    setRules(r1);
+    setTrades(r2);
+    setSettings(r3);
+    setForm((f) => ({ ...f, symbol: r3.contract }));
+    const c: Record<number, boolean> = {};
+    r1.forEach((rule: Rule) => (c[rule.id] = false));
+    setChecked(c);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    loadAll();
+  }, []);
+
+  useEffect(() => {
+    if (form.entry && form.exit) {
+      const entry = parseFloat(form.entry), exit = parseFloat(form.exit), size = parseFloat(form.size) || 1;
+      if (!isNaN(entry) && !isNaN(exit)) {
+        const points = form.dir === "long" ? exit - entry : entry - exit;
+        const mult = settings.multiplier || 20;
+        setForm((f) => ({ ...f, pnl: (points * mult * size).toFixed(2) }));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.entry, form.exit, form.size, form.dir]);
+
+  if (loading) {
+    return <div className="wrap"><p className="subhead">Loading cockpit...</p></div>;
+  }
+
+  // ---- derived stats ----
+  const disciplineScore = trades.length ? Math.round((trades.filter((t) => t.disciplined).length / trades.length) * 100) : null;
+  const today = new Date().toDateString();
+  const todaysTrades = trades.filter((t) => new Date(t.date).toDateString() === today);
+  const todaysPnl = todaysTrades.reduce((s, t) => s + t.pnl, 0);
+  let streak = 0;
+  for (let i = trades.length - 1; i >= 0; i--) {
+    if (trades[i].disciplined) streak++;
+    else break;
+  }
+  const limit = settings.dailyLossLimit;
+  const lossUsed = Math.min(Math.max(-todaysPnl, 0), limit);
+  const lossPct = limit > 0 ? Math.min((lossUsed / limit) * 100, 100) : 0;
+  const scoreColor = disciplineScore === null ? "var(--muted)" : disciplineScore >= 80 ? "var(--cyan)" : disciplineScore >= 50 ? "var(--amber)" : "var(--red)";
+
+  // ---- actions ----
+  async function toggleRule(id: number) {
+    setChecked((c) => ({ ...c, [id]: !c[id] }));
+  }
+  async function addRule() {
+    if (!newRuleText.trim()) return;
+    const rule = await fetch("/api/rules", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: newRuleText.trim() }),
+    }).then((r) => r.json());
+    setRules((r) => [...r, rule]);
+    setChecked((c) => ({ ...c, [rule.id]: false }));
+    setNewRuleText("");
+  }
+  async function deleteRule(id: number) {
+    await fetch("/api/rules", {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    setRules((r) => r.filter((x) => x.id !== id));
+  }
+  async function logTrade() {
+    const pnl = parseFloat(form.pnl);
+    if (isNaN(pnl)) { alert("Enter a P&L amount (or fill entry/exit/contracts to auto-calc)."); return; }
+    const disciplined = rules.every((r) => checked[r.id]);
+    const checklistSnapshot = rules.map((r) => ({ rule: r.text, passed: !!checked[r.id] }));
+    const trade = await fetch("/api/trades", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...form, pnl, disciplined, checklistSnapshot }),
+    }).then((r) => r.json());
+    setTrades((t) => [...t, trade]);
+    const c: Record<number, boolean> = {};
+    rules.forEach((r) => (c[r.id] = false));
+    setChecked(c);
+    setForm((f) => ({ ...f, entry: "", exit: "", pnl: "", setup: "", notes: "" }));
+    setConfirmMsg("✓ Trade logged.");
+    setTimeout(() => setConfirmMsg(null), 2500);
+  }
+  async function deleteTrade(id: number) {
+    if (!confirm("Delete this trade entry?")) return;
+    await fetch(`/api/trades/${id}`, { method: "DELETE" });
+    setTrades((t) => t.filter((x) => x.id !== id));
+  }
+  async function saveSettings(next: Settings) {
+    const updated = await fetch("/api/settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(next),
+    }).then((r) => r.json());
+    setSettings(updated);
+    alert("Settings saved.");
+  }
+
+  const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
+
+  return (
+    <div className="wrap">
+      <div className="header">
+        <div>
+          <div className="brand">NQ <span>COCKPIT</span></div>
+          <div className="subhead">Discipline Instrumentation // Personal Trading Log</div>
+        </div>
+        <div className="subhead">{new Date().toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</div>
+      </div>
+
+      <div className="strip">
+        <div className="gauge-card">
+          <div className="card-label">Discipline Gauge</div>
+          <div className="dial-wrap">
+            <Dial score={disciplineScore} color={scoreColor} />
+            <div>
+              <div className="dial-num" style={{ color: scoreColor }}>{disciplineScore === null ? "—" : disciplineScore + "%"}</div>
+              <div className="card-sub">{trades.length} trades logged</div>
+            </div>
+          </div>
+        </div>
+        <div className="gauge-card">
+          <div className="card-label">Today's P&amp;L</div>
+          <div className={`card-value ${todaysPnl > 0 ? "pos" : todaysPnl < 0 ? "neg" : ""}`}>{fmtMoney(todaysPnl)}</div>
+          <div className="card-sub">{todaysTrades.length} trade(s) today</div>
+        </div>
+        <div className="gauge-card">
+          <div className="card-label">Discipline Streak</div>
+          <div className={`card-value ${streak > 0 ? "pos" : ""}`}>{streak}</div>
+          <div className="card-sub">consecutive clean trades</div>
+        </div>
+        <div className="gauge-card">
+          <div className="card-label">Daily Loss Limit</div>
+          <div className={`card-value ${lossPct >= 100 ? "neg" : lossPct >= 70 ? "warn" : ""}`}>{fmtMoney(-lossUsed)} / {fmtMoney(-limit)}</div>
+          <div className="bar-track"><div className="bar-fill" style={{ width: `${lossPct}%`, background: lossPct >= 100 ? "var(--red)" : lossPct >= 70 ? "var(--amber)" : "var(--cyan)" }} /></div>
+        </div>
+      </div>
+
+      <div className="tabs">
+        {(["checklist", "journal", "dashboard", "settings"] as const).map((t) => (
+          <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
+            {t === "checklist" ? "Pre-Trade" : t}
+          </button>
+        ))}
+      </div>
+
+      {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
+
+      {tab === "checklist" && (
+        <>
+          <div className="panel-box">
+            <div className="panel-title">Pre-Trade Checklist</div>
+            <div className="panel-desc">Run through this before you enter. Skipping a check doesn't block you — but it will show up in your stats.</div>
+            {rules.map((rule) => (
+              <div key={rule.id} className={`rule-row ${checked[rule.id] ? "checked" : ""}`} onClick={() => toggleRule(rule.id)}>
+                <div className="rule-check">{checked[rule.id] ? "✓" : ""}</div>
+                <div className="rule-text">{rule.text}</div>
+                <button className="rule-del" onClick={(e) => { e.stopPropagation(); deleteRule(rule.id); }}>✕</button>
+              </div>
+            ))}
+            <div className="add-rule">
+              <input value={newRuleText} onChange={(e) => setNewRuleText(e.target.value)} placeholder="Add a rule..." />
+              <button className="btn small" onClick={addRule}>Add</button>
+            </div>
+            <div className={`status-banner ${allChecked ? "status-clear" : "status-warn"}`}>
+              {allChecked ? "✓ ALL CLEAR — cleared for entry." : `⚠ ${rules.filter((r) => !checked[r.id]).length} rule(s) not confirmed. You can still log the trade, but it will be flagged undisciplined.`}
+            </div>
+          </div>
+
+          <div className="panel-box">
+            <div className="panel-title">Log This Trade</div>
+            <div className="panel-desc">Checklist state above will be attached to this trade automatically.</div>
+            <div className="grid3">
+              <div className="field"><label>Symbol</label><input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} /></div>
+              <div className="field"><label>Direction</label>
+                <select value={form.dir} onChange={(e) => setForm({ ...form, dir: e.target.value })}>
+                  <option value="long">Long</option><option value="short">Short</option>
+                </select>
+              </div>
+              <div className="field"><label>Session</label>
+                <select value={form.session} onChange={(e) => setForm({ ...form, session: e.target.value })}>
+                  <option>NY Open</option><option>NY AM</option><option>NY PM</option><option>London</option><option>Asia</option><option>Overnight</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid3">
+              <div className="field"><label>Entry Price</label><input type="number" step="0.25" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} /></div>
+              <div className="field"><label>Exit Price</label><input type="number" step="0.25" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} /></div>
+              <div className="field"><label>Contracts</label><input type="number" min="1" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} /></div>
+            </div>
+            <div className="grid2">
+              <div className="field"><label>P&amp;L ($) — auto or manual</label><input type="number" step="0.01" value={form.pnl} onChange={(e) => setForm({ ...form, pnl: e.target.value })} /></div>
+              <div className="field"><label>Setup Tag</label><input value={form.setup} onChange={(e) => setForm({ ...form, setup: e.target.value })} placeholder="e.g. ORB, VWAP reclaim" /></div>
+            </div>
+            <div className="field">
+              <label>Emotional State</label>
+              <select value={form.emotion} onChange={(e) => setForm({ ...form, emotion: e.target.value })}>
+                <option>Calm / neutral</option><option>Confident</option><option>Anxious</option><option>FOMO</option><option>Tilted / revenge</option><option>Bored / distracted</option>
+              </select>
+            </div>
+            <div className="field"><label>Notes</label><textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="What did you see? What would you tell a friend about this trade?" /></div>
+            <button className="btn primary" onClick={logTrade}>Log Trade</button>
+          </div>
+        </>
+      )}
+
+      {tab === "journal" && (
+        <div className="panel-box">
+          <div className="panel-title">Trade Journal</div>
+          {trades.length === 0 ? (
+            <div className="empty-state"><div className="big">📋</div>No trades logged yet.<br />Head to Pre-Trade to log your first one.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table>
+                <thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th><th></th></tr></thead>
+                <tbody>
+                  {[...trades].reverse().map((t) => {
+                    const d = new Date(t.date);
+                    return (
+                      <tr key={t.id}>
+                        <td>{d.toLocaleDateString()} {d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                        <td>{t.symbol}</td>
+                        <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
+                        <td>{t.setup || "—"}</td>
+                        <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
+                        <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
+                        <td>{t.emotion}</td>
+                        <td>
+                          <button className="btn small ghost" onClick={() => setViewTradeId(viewTradeId === t.id ? null : t.id)}>View</button>{" "}
+                          <button className="btn small ghost" onClick={() => deleteTrade(t.id)}>Del</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {viewTradeId !== null && (() => {
+            const t = trades.find((x) => x.id === viewTradeId);
+            if (!t) return null;
+            return (
+              <div className="panel-box" style={{ marginTop: 16 }}>
+                <div className="panel-title">Trade Detail — {new Date(t.date).toLocaleString()}</div>
+                <p style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap" }}>{escapeHtml(t.notes) || "(no notes)"}</p>
+                <div className="rule-toggle-list">
+                  {t.checklistSnapshot.map((c, i) => (
+                    <span key={i} className={`mini-tag ${c.passed ? "" : "on"}`}>{c.passed ? "✓" : "✕"} {c.rule}</span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {tab === "dashboard" && <Dashboard trades={trades} />}
+
+      {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
+
+      <div className="footer-note">Data is stored in your own database — private to your account.</div>
+    </div>
+  );
+}
+
+function Dial({ score, color }: { score: number | null; color: string }) {
+  const pct = score === null ? 0 : score;
+  const r = 26, circ = 2 * Math.PI * r;
+  const offset = circ - (pct / 100) * circ;
+  return (
+    <svg width="64" height="64" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r={r} fill="none" stroke="var(--line)" strokeWidth="6" />
+      <circle cx="32" cy="32" r={r} fill="none" stroke={color} strokeWidth="6"
+        strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+        transform="rotate(-90 32 32)" style={{ transition: "stroke-dashoffset .4s" }} />
+    </svg>
+  );
+}
+
+function Dashboard({ trades }: { trades: Trade[] }) {
+  if (trades.length === 0) {
+    return <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>;
+  }
+  const wins = trades.filter((t) => t.pnl > 0).length;
+  const losses = trades.filter((t) => t.pnl < 0).length;
+  const winRate = Math.round((wins / trades.length) * 100);
+  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+  const avgWin = wins ? trades.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
+  const avgLoss = losses ? Math.abs(trades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0) / losses) : 0;
+  const expectancy = (winRate / 100) * avgWin - (1 - winRate / 100) * avgLoss;
+  const clean = trades.filter((t) => t.disciplined);
+  const flagged = trades.filter((t) => !t.disciplined);
+  const cleanAvg = clean.length ? clean.reduce((s, t) => s + t.pnl, 0) / clean.length : 0;
+  const flagAvg = flagged.length ? flagged.reduce((s, t) => s + t.pnl, 0) / flagged.length : 0;
+  const cleanWinRate = clean.length ? Math.round((clean.filter((t) => t.pnl > 0).length / clean.length) * 100) : 0;
+  const flagWinRate = flagged.length ? Math.round((flagged.filter((t) => t.pnl > 0).length / flagged.length) * 100) : 0;
+  const maxAbs = Math.max(Math.abs(cleanAvg), Math.abs(flagAvg), 1);
+
+  const w = 900, h = 180, pad = 10;
+  let cum = 0;
+  const points = trades.map((t) => (cum += t.pnl));
+  const min = Math.min(0, ...points), max = Math.max(0, ...points);
+  const range = max - min || 1;
+  const stepX = points.length > 1 ? (w - 2 * pad) / (points.length - 1) : 0;
+  const coords = points.map((p, i) => `${pad + i * stepX},${h - pad - ((p - min) / range) * (h - 2 * pad)}`).join(" ");
+  const zeroY = h - pad - ((0 - min) / range) * (h - 2 * pad);
+  const last = points[points.length - 1];
+  const curveColor = last >= 0 ? "var(--cyan)" : "var(--red)";
+
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Performance Summary</div>
+        <div className="stat-grid">
+          <div className="stat-box"><div className={`stat-num ${totalPnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(totalPnl)}</div><div className="stat-lbl">Total P&amp;L</div></div>
+          <div className="stat-box"><div className="stat-num">{winRate}%</div><div className="stat-lbl">Win Rate</div></div>
+          <div className="stat-box"><div className="stat-num pnl-pos">{fmtMoney(avgWin)}</div><div className="stat-lbl">Avg Win</div></div>
+          <div className="stat-box"><div className="stat-num pnl-neg">-{fmtMoney(avgLoss)}</div><div className="stat-lbl">Avg Loss</div></div>
+        </div>
+        <div className="stat-grid">
+          <div className="stat-box"><div className={`stat-num ${expectancy >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(expectancy)}</div><div className="stat-lbl">Expectancy / Trade</div></div>
+          <div className="stat-box"><div className="stat-num">{trades.length}</div><div className="stat-lbl">Total Trades</div></div>
+          <div className="stat-box"><div className="stat-num">{clean.length}</div><div className="stat-lbl">Clean Trades</div></div>
+          <div className="stat-box"><div className="stat-num" style={{ color: "var(--amber)" }}>{flagged.length}</div><div className="stat-lbl">Flagged Trades</div></div>
+        </div>
+      </div>
+      <div className="panel-box">
+        <div className="panel-title">Equity Curve</div>
+        <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
+          <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="var(--line)" strokeDasharray="4 4" />
+          <polyline points={coords} fill="none" stroke={curveColor} strokeWidth="2" />
+        </svg>
+      </div>
+      <div className="panel-box">
+        <div className="panel-title">Disciplined vs. Undisciplined</div>
+        <div className="panel-desc">Does following your rules actually pay?</div>
+        <div className="compare-bars">
+          <CompareRow label="Clean avg P&L" value={cleanAvg} max={maxAbs} display={fmtMoney(cleanAvg)} />
+          <CompareRow label="Flagged avg P&L" value={flagAvg} max={maxAbs} display={fmtMoney(flagAvg)} />
+          <CompareRow label="Clean win rate" value={cleanWinRate} max={100} color="var(--cyan)" display={`${cleanWinRate}%`} />
+          <CompareRow label="Flagged win rate" value={flagWinRate} max={100} color="var(--amber)" display={`${flagWinRate}%`} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CompareRow({ label, value, max, display, color }: { label: string; value: number; max: number; display: string; color?: string }) {
+  const pct = Math.abs(value) / max * 100;
+  const barColor = color || (value >= 0 ? "var(--cyan)" : "var(--red)");
+  return (
+    <div className="compare-row">
+      <div className="compare-lbl">{label}</div>
+      <div className="compare-track"><div className="compare-fill" style={{ width: `${pct}%`, background: barColor }} /></div>
+      <div className="compare-val">{display}</div>
+    </div>
+  );
+}
+
+function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: Settings) => void }) {
+  const [local, setLocal] = useState(settings);
+  return (
+    <>
+      <div className="panel-box">
+        <div className="panel-title">Account Settings</div>
+        <div className="grid3">
+          <div className="field">
+            <label>Contract</label>
+            <select value={local.contract} onChange={(e) => {
+              const contract = e.target.value;
+              const mult = CONTRACTS[contract];
+              setLocal((l) => ({ ...l, contract, multiplier: mult ?? l.multiplier }));
+            }}>
+              {Object.keys(CONTRACTS).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="field"><label>Point Multiplier ($/pt)</label><input type="number" value={local.multiplier} onChange={(e) => setLocal({ ...local, multiplier: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Daily Loss Limit ($)</label><input type="number" value={local.dailyLossLimit} onChange={(e) => setLocal({ ...local, dailyLossLimit: parseFloat(e.target.value) })} /></div>
+        </div>
+        <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+      </div>
+    </>
+  );
+}
