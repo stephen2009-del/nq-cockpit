@@ -74,8 +74,8 @@ export function getTradingWindowStatus(
     timeZone: "America/New_York",
     weekday: "short",
   }).format(now);
-  if (etWeekday === "Sat" || etWeekday === "Sun") {
-    return { allowed: false, reason: `Markets are closed on weekends (${etWeekday}).`, etLabel };
+  if (etWeekday === "Sat") {
+    return { allowed: false, reason: `Markets are closed on Saturday.`, etLabel };
   }
 
   if (current < start) {

@@ -1357,7 +1357,17 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             <input type="number" min="1" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} />
           </div>
           <div className="field"><label>Order Type</label>
-            <select value={form.orderType} onChange={(e) => setForm({ ...form, orderType: e.target.value })}>
+            <select
+              value={form.orderType}
+              onChange={(e) => {
+                const newType = e.target.value;
+                setForm((f) => ({
+                  ...f,
+                  orderType: newType,
+                  price: newType === "Limit" && !f.price && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price,
+                }));
+              }}
+            >
               <option value="Market">Market</option>
               <option value="Limit">Limit</option>
             </select>
@@ -1373,9 +1383,11 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                 }}
               />
               <div className="card-sub" style={{ marginTop: 4 }}>
-                {lastKnownPrice !== null
-                  ? `Prefilled from your last logged price (${roundToTick(lastKnownPrice).toFixed(2)}, rounded to the nearest .25 tick) — not a live quote. Adjust as needed.`
-                  : "No recent price logged in Pre-Market/Intraday — enter manually."}
+                {!form.price && lastKnownPrice !== null
+                  ? `Not filled in yet. Your last logged price was ${roundToTick(lastKnownPrice).toFixed(2)} — not a live quote. Enter a price or clear/reselect Order Type to prefill it.`
+                  : !form.price
+                  ? "No recent price logged in Pre-Market/Intraday — enter manually."
+                  : "Not a live quote — double check this price before submitting."}
               </div>
             </div>
           )}
