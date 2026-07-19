@@ -46,6 +46,13 @@ function fmtMoney(n: number) {
   return sign + "$" + Math.abs(n).toFixed(2);
 }
 
+// NQ and MNQ both trade in quarter-point ticks (.00/.25/.50/.75). Any price
+// derived from QQQ × multiplier lands on arbitrary decimals, so anything
+// used as an actual limit price needs to snap to a real tradable tick first.
+function roundToTick(price: number, tick: number = 0.25): number {
+  return Math.round(price / tick) * tick;
+}
+
 function addMinutesLabel(hhmm: string, deltaMinutes: number): string {
   const [h, m] = hhmm.split(":").map(Number);
   let total = h * 60 + m + deltaMinutes;
@@ -1176,7 +1183,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }, [form.root, settings.tradovateEnv]);
 
   function useLimitOrder() {
-    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPrice !== null ? String(lastKnownPrice) : f.price }));
+    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price }));
   }
 
   async function submitOrder() {
@@ -1197,7 +1204,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           action: form.action,
           orderQty: form.qty,
           orderType: form.orderType,
-          price: form.orderType === "Limit" ? form.price : undefined,
+          price: form.orderType === "Limit" ? String(roundToTick(parseFloat(form.price))) : undefined,
         }),
       });
       const data = await res.json();
@@ -1283,10 +1290,17 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           </div>
           {form.orderType === "Limit" && (
             <div className="field"><label>Limit Price</label>
-              <input type="number" step="0.25" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} />
+              <input
+                type="number" step="0.25" value={form.price}
+                onChange={(e) => setForm({ ...form, price: e.target.value })}
+                onBlur={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v)) setForm((f) => ({ ...f, price: String(roundToTick(v)) }));
+                }}
+              />
               <div className="card-sub" style={{ marginTop: 4 }}>
                 {lastKnownPrice !== null
-                  ? `Prefilled from your last logged price (${lastKnownPrice.toFixed(2)}) — not a live quote. Adjust as needed.`
+                  ? `Prefilled from your last logged price (${roundToTick(lastKnownPrice).toFixed(2)}, rounded to the nearest .25 tick) — not a live quote. Adjust as needed.`
                   : "No recent price logged in Pre-Market/Intraday — enter manually."}
               </div>
             </div>
@@ -1294,7 +1308,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         </div>
         {form.orderType === "Market" && lastKnownPrice !== null && (
           <button className="btn small ghost" onClick={useLimitOrder} style={{ marginBottom: 12 }}>
-            Switch to Limit @ last known price ({lastKnownPrice.toFixed(2)})
+            Switch to Limit @ last known price ({roundToTick(lastKnownPrice).toFixed(2)})
           </button>
         )}
 
