@@ -380,6 +380,11 @@ export default function Page() {
 
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
+  const todayStr = new Date().toDateString();
+  const latestIntradayToday = [...intradayChecks].reverse().find((c) => new Date(c.date).toDateString() === todayStr);
+  const todayPrepForForm = preMarketHistory.find((p) => new Date(p.date).toDateString() === todayStr);
+  const journalLastKnownPrice = latestIntradayToday?.nqPrice ?? todayPrepForForm?.nqPrice ?? null;
+
   const RISK_TAGS = ["FOMO", "Tilted / Revenge", "Overconfident", "Doubt"];
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -500,7 +505,14 @@ export default function Page() {
             <div className="panel-title">Log This Trade</div>
             <div className="panel-desc">Checklist state above will be attached to this trade automatically.</div>
             <div className="grid3">
-              <div className="field"><label>Symbol</label><input value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })} /></div>
+              <div className="field"><label>Symbol</label>
+                <select value={form.symbol} onChange={(e) => setForm({ ...form, symbol: e.target.value })}>
+                  <option value="NQ">NQ</option>
+                  <option value="MNQ">MNQ</option>
+                  <option value="ES">ES</option>
+                  <option value="MES">MES</option>
+                </select>
+              </div>
               <div className="field"><label>Direction</label>
                 <select value={form.dir} onChange={(e) => setForm({ ...form, dir: e.target.value })}>
                   <option value="long">Long</option><option value="short">Short</option>
@@ -513,8 +525,24 @@ export default function Page() {
               </div>
             </div>
             <div className="grid3">
-              <div className="field"><label>Entry Price</label><input type="number" step="0.25" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} /></div>
-              <div className="field"><label>Exit Price</label><input type="number" step="0.25" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} /></div>
+              <div className="field">
+                <label>Entry Price</label>
+                <input type="number" step="0.25" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} />
+                {journalLastKnownPrice !== null && (
+                  <button type="button" className="btn small ghost" style={{ marginTop: 6 }} onClick={() => setForm((f) => ({ ...f, entry: String(roundToTick(journalLastKnownPrice)) }))}>
+                    Use last known price ({roundToTick(journalLastKnownPrice).toFixed(2)})
+                  </button>
+                )}
+              </div>
+              <div className="field">
+                <label>Exit Price</label>
+                <input type="number" step="0.25" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} />
+                {journalLastKnownPrice !== null && (
+                  <button type="button" className="btn small ghost" style={{ marginTop: 6 }} onClick={() => setForm((f) => ({ ...f, exit: String(roundToTick(journalLastKnownPrice)) }))}>
+                    Use last known price ({roundToTick(journalLastKnownPrice).toFixed(2)})
+                  </button>
+                )}
+              </div>
               <div className="field"><label>Contracts</label><input type="number" min="1" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} /></div>
             </div>
             <div className="grid2">
