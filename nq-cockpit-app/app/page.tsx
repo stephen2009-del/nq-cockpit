@@ -21,6 +21,8 @@ type Trade = {
   notes: string | null;
   disciplined: boolean;
   checklistSnapshot: { rule: string; passed: boolean }[];
+  plannedStop: number | null;
+  plannedTarget: number | null;
 };
 type Settings = {
   id: number;
@@ -44,6 +46,44 @@ const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 
 function fmtMoney(n: number) {
   const sign = n < 0 ? "-" : "";
   return sign + "$" + Math.abs(n).toFixed(2);
+}
+
+type DisciplineFlag = { type: "ran_loser" | "early_profit"; text: string };
+
+// Compares what actually happened against the trader's OWN stated plan
+// (planned stop / planned target logged at trade time) — never invents a
+// plan they didn't declare, and says nothing if either wasn't provided.
+function analyzeTradeDiscipline(t: Trade): DisciplineFlag[] {
+  const flags: DisciplineFlag[] = [];
+  if (t.entry === null || t.exit === null) return flags;
+
+  const isLong = t.dir === "long";
+
+  if (t.plannedStop !== null && t.pnl < 0) {
+    const plannedRisk = Math.abs(t.entry - t.plannedStop);
+    const actualLoss = Math.abs(t.entry - t.exit);
+    if (plannedRisk > 0 && actualLoss > plannedRisk * 1.1) {
+      const overBy = actualLoss - plannedRisk;
+      flags.push({
+        type: "ran_loser",
+        text: `You let this loser run past your own planned stop. Planned risk was ${plannedRisk.toFixed(2)} pts, actual loss was ${actualLoss.toFixed(2)} pts — ${overBy.toFixed(2)} pts further than you said you would go.`,
+      });
+    }
+  }
+
+  if (t.plannedTarget !== null && t.pnl > 0) {
+    const plannedReward = Math.abs(t.plannedTarget - t.entry);
+    const actualGain = Math.abs(t.exit - t.entry);
+    if (plannedReward > 0 && actualGain < plannedReward * 0.5) {
+      const pctCaptured = Math.round((actualGain / plannedReward) * 100);
+      flags.push({
+        type: "early_profit",
+        text: `You took profit early relative to your own plan. You captured ${actualGain.toFixed(2)} of your planned ${plannedReward.toFixed(2)}-pt target — only ${pctCaptured}% of the move you said you were aiming for.`,
+      });
+    }
+  }
+
+  return flags;
 }
 
 // NQ and MNQ both trade in quarter-point ticks (.00/.25/.50/.75). Any price
@@ -143,7 +183,7 @@ export default function Page() {
 
   const [form, setForm] = useState({
     symbol: "NQ", dir: "long", session: "NY Open", entry: "", exit: "", size: "1",
-    pnl: "", setup: "", emotion: "Calm / neutral", notes: "",
+    pnl: "", setup: "", emotion: "Calm / neutral", notes: "", plannedStop: "", plannedTarget: "",
   });
 
   async function loadAll() {
@@ -250,7 +290,7 @@ export default function Page() {
     const c: Record<number, boolean> = {};
     rules.forEach((r) => (c[r.id] = false));
     setChecked(c);
-    setForm((f) => ({ ...f, entry: "", exit: "", pnl: "", setup: "", notes: "" }));
+    setForm((f) => ({ ...f, entry: "", exit: "", pnl: "", setup: "", notes: "", plannedStop: "", plannedTarget: "" }));
     setConfirmMsg("✓ Trade logged.");
     setTimeout(() => setConfirmMsg(null), 2500);
   }
@@ -481,6 +521,13 @@ export default function Page() {
               <div className="field"><label>P&amp;L ($) — auto or manual</label><input type="number" step="0.01" value={form.pnl} onChange={(e) => setForm({ ...form, pnl: e.target.value })} /></div>
               <div className="field"><label>Setup Tag</label><input value={form.setup} onChange={(e) => setForm({ ...form, setup: e.target.value })} placeholder="e.g. ORB, VWAP reclaim" /></div>
             </div>
+            <div className="grid2">
+              <div className="field"><label>Planned Stop (price)</label><input type="number" step="0.25" value={form.plannedStop} onChange={(e) => setForm({ ...form, plannedStop: e.target.value })} placeholder="Where you'd planned to cut it" /></div>
+              <div className="field"><label>Planned Target (price)</label><input type="number" step="0.25" value={form.plannedTarget} onChange={(e) => setForm({ ...form, plannedTarget: e.target.value })} placeholder="Where you'd planned to take profit" /></div>
+            </div>
+            <div className="panel-desc" style={{ marginTop: -8 }}>
+              Optional, but this is what lets the Journal and Dashboard tell you honestly whether you let a loser run past your own plan, or took profit early relative to your own target — not my opinion, your stated plan vs. what actually happened.
+            </div>
             <div className="field">
               <label>Emotional State</label>
               <select value={form.emotion} onChange={(e) => setForm({ ...form, emotion: e.target.value })}>
@@ -501,10 +548,11 @@ export default function Page() {
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table>
-                <thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th><th></th></tr></thead>
+                <thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th><th>Plan Check</th><th></th></tr></thead>
                 <tbody>
                   {[...trades].reverse().map((t) => {
                     const d = new Date(t.date);
+                    const flags = analyzeTradeDiscipline(t);
                     return (
                       <tr key={t.id}>
                         <td>{d.toLocaleDateString()} {d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
@@ -514,6 +562,13 @@ export default function Page() {
                         <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
                         <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                         <td>{t.emotion}</td>
+                        <td>
+                          {flags.length === 0 ? "—" : flags.map((f, i) => (
+                            <span key={i} className="tag flag" style={{ display: "block", marginBottom: 2 }}>
+                              {f.type === "ran_loser" ? "⚠ RAN LOSER" : "⚠ EARLY EXIT"}
+                            </span>
+                          ))}
+                        </td>
                         <td>
                           <button className="btn small ghost" onClick={() => setViewTradeId(viewTradeId === t.id ? null : t.id)}>View</button>{" "}
                           <button className="btn small ghost" onClick={() => deleteTrade(t.id)}>Del</button>
@@ -528,9 +583,27 @@ export default function Page() {
           {viewTradeId !== null && (() => {
             const t = trades.find((x) => x.id === viewTradeId);
             if (!t) return null;
+            const flags = analyzeTradeDiscipline(t);
             return (
               <div className="panel-box" style={{ marginTop: 16 }}>
                 <div className="panel-title">Trade Detail — {new Date(t.date).toLocaleString()}</div>
+                {flags.length > 0 && (
+                  <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {flags.map((f, i) => (
+                      <div key={i} className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" }}>
+                        ⚠ {f.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {t.plannedStop !== null || t.plannedTarget !== null ? (
+                  <div className="card-sub" style={{ marginBottom: 10 }}>
+                    Planned: {t.plannedStop !== null ? `stop ${t.plannedStop.toFixed(2)}` : "no stop declared"}
+                    {" · "}
+                    {t.plannedTarget !== null ? `target ${t.plannedTarget.toFixed(2)}` : "no target declared"}
+                    {" · "}actual exit {t.exit?.toFixed(2) ?? "—"}
+                  </div>
+                ) : null}
                 <p style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap" }}>{escapeHtml(t.notes) || "(no notes)"}</p>
                 <div className="rule-toggle-list">
                   {t.checklistSnapshot.map((c, i) => (
@@ -1881,6 +1954,11 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   const setupStats = groupBy(trades, (t) => t.setup || "(none)");
   const emotionStats = groupBy(trades, (t) => t.emotion || "(none)");
 
+  const tradesWithFlags = trades.map((t) => ({ trade: t, flags: analyzeTradeDiscipline(t) }));
+  const ranLoserTrades = tradesWithFlags.filter((x) => x.flags.some((f) => f.type === "ran_loser"));
+  const earlyProfitTrades = tradesWithFlags.filter((x) => x.flags.some((f) => f.type === "early_profit"));
+  const tradesWithAPlan = trades.filter((t) => t.plannedStop !== null || t.plannedTarget !== null).length;
+
   return (
     <>
       <div className="panel-box">
@@ -1901,6 +1979,34 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
           <div className="stat-box"><div className="stat-num" style={{ color: "var(--amber)" }}>{flagged.length}</div><div className="stat-lbl">Flagged Trades</div></div>
         </div>
       </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Plan Discipline</div>
+        <div className="panel-desc">
+          Compares what actually happened to your own stated plan (planned stop / target, logged with the trade) —
+          not a judgment call, just your plan vs. your execution. {tradesWithAPlan} of {trades.length} trades had a plan declared.
+        </div>
+        {tradesWithAPlan === 0 ? (
+          <div className="empty-state">No trades with a planned stop or target yet — log one on Pre-Trade to start tracking this.</div>
+        ) : (
+          <>
+            <div className="stat-grid">
+              <div className="stat-box"><div className="stat-num" style={{ color: ranLoserTrades.length > 0 ? "var(--red)" : undefined }}>{ranLoserTrades.length}</div><div className="stat-lbl">Times you let a loser run</div></div>
+              <div className="stat-box"><div className="stat-num" style={{ color: earlyProfitTrades.length > 0 ? "var(--amber)" : undefined }}>{earlyProfitTrades.length}</div><div className="stat-lbl">Times you took profit early</div></div>
+            </div>
+            {(ranLoserTrades.length > 0 || earlyProfitTrades.length > 0) && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+                {[...ranLoserTrades, ...earlyProfitTrades].slice(0, 5).map(({ trade, flags }) => (
+                  <div key={trade.id} className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" }}>
+                    {new Date(trade.date).toLocaleDateString()} — {flags[0].text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
       <div className="panel-box">
         <div className="panel-title">Equity Curve</div>
         <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">

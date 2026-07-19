@@ -22,6 +22,8 @@ export async function POST(req: NextRequest) {
       notes: body.notes,
       disciplined: body.disciplined,
       checklistSnapshot: body.checklistSnapshot,
+      plannedStop: body.plannedStop ? parseFloat(body.plannedStop) : null,
+      plannedTarget: body.plannedTarget ? parseFloat(body.plannedTarget) : null,
     },
   });
   return NextResponse.json(trade);

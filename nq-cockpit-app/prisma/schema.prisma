@@ -29,6 +29,8 @@ model Trade {
   notes             String?
   disciplined       Boolean
   checklistSnapshot Json
+  plannedStop       Float?
+  plannedTarget     Float?
 }
 
 model Settings {
