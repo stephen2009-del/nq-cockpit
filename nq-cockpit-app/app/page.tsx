@@ -1100,6 +1100,8 @@ type OrderLog = {
   qty: number;
   orderType: string;
   limitPrice: number | null;
+  stopLossPrice: number | null;
+  targetPrice: number | null;
   status: string;
   blockedReason: string | null;
   tradovateOrderId: string | null;
@@ -1109,7 +1111,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [windowStatus, setWindowStatus] = useState(() => getTradingWindowStatus(settings));
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
-  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "" });
+  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
   const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
@@ -1191,6 +1193,10 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       alert("Fill in account and quantity, and make sure a contract has resolved.");
       return;
     }
+    if ((form.stopLoss && !form.target) || (!form.stopLoss && form.target)) {
+      alert("Stop Loss and Target must both be filled in together, or both left blank.");
+      return;
+    }
     setSubmitting(true);
     setResult(null);
     try {
@@ -1205,6 +1211,8 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           orderQty: form.qty,
           orderType: form.orderType,
           price: form.orderType === "Limit" ? String(roundToTick(parseFloat(form.price))) : undefined,
+          stopLoss: form.stopLoss ? String(roundToTick(parseFloat(form.stopLoss))) : undefined,
+          target: form.target ? String(roundToTick(parseFloat(form.target))) : undefined,
         }),
       });
       const data = await res.json();
@@ -1312,8 +1320,33 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           </button>
         )}
 
+        <div style={{ marginTop: 8, marginBottom: 4 }}>
+          <div className="card-label">STOP LOSS / TARGET (OPTIONAL)</div>
+          <div className="panel-desc" style={{ marginTop: 4 }}>
+            Fill in both to submit as a bracket order — Tradovate attaches the stop and target automatically once your entry fills. Leave both blank for a plain order with no attached exit.
+          </div>
+        </div>
+        <div className="grid2">
+          <div className="field"><label>Stop Loss (price)</label>
+            <input
+              type="number" step="0.25" value={form.stopLoss}
+              onChange={(e) => setForm({ ...form, stopLoss: e.target.value })}
+              onBlur={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setForm((f) => ({ ...f, stopLoss: String(roundToTick(v)) })); }}
+              placeholder="e.g. 28700.00"
+            />
+          </div>
+          <div className="field"><label>Target (price)</label>
+            <input
+              type="number" step="0.25" value={form.target}
+              onChange={(e) => setForm({ ...form, target: e.target.value })}
+              onBlur={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setForm((f) => ({ ...f, target: String(roundToTick(v)) })); }}
+              placeholder="e.g. 28800.00"
+            />
+          </div>
+        </div>
+
         <button className="btn primary" onClick={submitOrder} disabled={submitting || !!lockout || !windowStatus.allowed || resolving || !resolvedSymbol?.symbol}>
-          {submitting ? "Submitting…" : lockout ? "Locked" : !windowStatus.allowed ? "Blocked — outside trading window" : resolving ? "Resolving contract…" : !resolvedSymbol?.symbol ? "No contract resolved" : "Submit Order"}
+          {submitting ? "Submitting…" : lockout ? "Locked" : !windowStatus.allowed ? "Blocked — outside trading window" : resolving ? "Resolving contract…" : !resolvedSymbol?.symbol ? "No contract resolved" : (form.stopLoss && form.target) ? "Submit Bracket Order" : "Submit Order"}
         </button>
 
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
@@ -1352,7 +1385,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table>
-              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>Status</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>SL / Target</th><th>Status</th><th>Detail</th></tr></thead>
               <tbody>
                 {logs.map((l) => (
                   <tr key={l.id}>
@@ -1362,6 +1395,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                     <td><span className={`tag ${l.side === "Buy" ? "long" : "short"}`}>{l.side.toUpperCase()}</span></td>
                     <td>{l.qty}</td>
                     <td>{l.orderType}{l.limitPrice ? ` @ ${l.limitPrice}` : ""}</td>
+                    <td>{l.stopLossPrice && l.targetPrice ? `${l.stopLossPrice} / ${l.targetPrice}` : "—"}</td>
                     <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : "flag"}`}>{l.status}</span></td>
                     <td style={{ maxWidth: 260, whiteSpace: "normal" }}>{l.blockedReason || l.tradovateOrderId || "—"}</td>
                   </tr>

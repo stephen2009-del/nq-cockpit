@@ -53,6 +53,8 @@ model TradovateOrderLog {
   qty            Int
   orderType      String
   limitPrice     Float?
+  stopLossPrice  Float?
+  targetPrice    Float?
   status         String
   blockedReason  String?
   tradovateOrderId String?

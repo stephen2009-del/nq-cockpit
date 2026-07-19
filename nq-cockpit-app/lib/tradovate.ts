@@ -307,3 +307,46 @@ export async function placeOrder(
   });
   return result;
 }
+
+// Bracket order: entry + stop-loss + target, submitted together. Tradovate
+// auto-places the stop and target once the entry fills. Based on a payload
+// shape confirmed working by a Tradovate API user (Tradovate community
+// forum, "Place a TP + SL order via API" thread) — not tested by me against
+// a live account. accountSpec is the account's name string (not its numeric
+// ID) — Tradovate's OSO endpoint requires both.
+export async function placeOSO(
+  env: Env,
+  params: {
+    accountId: number;
+    accountSpec: string;
+    symbol: string;
+    action: "Buy" | "Sell";
+    orderType: "Market" | "Limit";
+    orderQty: number;
+    price?: number; // only for Limit entries
+    stopLossPrice: number;
+    targetPrice: number;
+  }
+) {
+  const closingAction = params.action === "Buy" ? "Sell" : "Buy";
+  const payload: Record<string, unknown> = {
+    accountId: params.accountId,
+    accountSpec: params.accountSpec,
+    symbol: params.symbol,
+    action: params.action,
+    orderType: params.orderType,
+    orderQty: params.orderQty,
+    isAutomated: true,
+    bracket1: { action: closingAction, orderType: "Stop", stopPrice: params.stopLossPrice },
+    bracket2: { action: closingAction, orderType: "Limit", price: params.targetPrice },
+  };
+  if (params.orderType === "Limit" && params.price !== undefined) {
+    payload.price = params.price;
+  }
+
+  const result = await tradovateFetch(env, "/order/placeOSO", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return result;
+}

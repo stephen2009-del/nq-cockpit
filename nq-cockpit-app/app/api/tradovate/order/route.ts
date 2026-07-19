@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { placeOrder, findOpenPosition, getEnrichedFills, extractPositionPnl, extractAccountOpenPnl, getCashBalance } from "@/lib/tradovate";
+import { placeOrder, placeOSO, getAccounts, findOpenPosition, getEnrichedFills, extractPositionPnl, extractAccountOpenPnl, getCashBalance } from "@/lib/tradovate";
 import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
@@ -16,7 +16,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { env, accountId, symbol, action, orderQty, orderType, price } = body;
+  const { env, accountId, symbol, action, orderQty, orderType, price, stopLoss, target } = body;
 
   if (!env || (env !== "demo" && env !== "live")) {
     return NextResponse.json({ error: "env must be 'demo' or 'live'" }, { status: 400 });
@@ -171,15 +171,41 @@ export async function POST(req: NextRequest) {
     console.error("Daily loss limit check failed:", err.message || err);
   }
 
+  const hasBracket = stopLoss !== undefined && stopLoss !== null && stopLoss !== "" && target !== undefined && target !== null && target !== "";
+
   try {
-    const result = await placeOrder(env, {
-      accountId: parseInt(accountId),
-      symbol,
-      action,
-      orderQty: parseInt(orderQty),
-      orderType,
-      price: price ? parseFloat(price) : undefined,
-    });
+    let result;
+    if (hasBracket) {
+      // accountSpec (the account's name string) is required by Tradovate's
+      // OSO endpoint alongside accountId — resolve it from the accounts list.
+      const accountsResult = await getAccounts(env);
+      const matchingAccount = accountsResult.ok && Array.isArray(accountsResult.body)
+        ? accountsResult.body.find((a: any) => String(a.id) === String(accountId))
+        : null;
+      if (!matchingAccount) {
+        throw new Error("Could not resolve account name (accountSpec) required for bracket orders.");
+      }
+      result = await placeOSO(env, {
+        accountId: parseInt(accountId),
+        accountSpec: matchingAccount.name,
+        symbol,
+        action,
+        orderQty: parseInt(orderQty),
+        orderType,
+        price: price ? parseFloat(price) : undefined,
+        stopLossPrice: parseFloat(stopLoss),
+        targetPrice: parseFloat(target),
+      });
+    } else {
+      result = await placeOrder(env, {
+        accountId: parseInt(accountId),
+        symbol,
+        action,
+        orderQty: parseInt(orderQty),
+        orderType,
+        price: price ? parseFloat(price) : undefined,
+      });
+    }
 
     const log = await prisma.tradovateOrderLog.create({
       data: {
@@ -189,6 +215,8 @@ export async function POST(req: NextRequest) {
         qty: parseInt(orderQty),
         orderType,
         limitPrice: price ? parseFloat(price) : null,
+        stopLossPrice: hasBracket ? parseFloat(stopLoss) : null,
+        targetPrice: hasBracket ? parseFloat(target) : null,
         status: result.ok ? "SUBMITTED" : "ERROR",
         tradovateOrderId: result.ok ? String(result.body.orderId ?? "") : null,
         rawResponse: result.body,
@@ -208,6 +236,8 @@ export async function POST(req: NextRequest) {
         qty: parseInt(orderQty),
         orderType,
         limitPrice: price ? parseFloat(price) : null,
+        stopLossPrice: hasBracket ? parseFloat(stopLoss) : null,
+        targetPrice: hasBracket ? parseFloat(target) : null,
         status: "ERROR",
         blockedReason: err.message || String(err),
       },
