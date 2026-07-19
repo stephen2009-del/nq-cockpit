@@ -1091,6 +1091,24 @@ function IntradayTab({
   );
 }
 
+type StopRule = {
+  id: number;
+  createdAt: string;
+  env: string;
+  accountId: number;
+  symbol: string;
+  direction: string;
+  entryPrice: number;
+  qty: number;
+  triggerOffset: number;
+  newStopOffset: number;
+  status: string;
+  triggeredAt: string | null;
+  newStopPrice: number | null;
+  verified: boolean | null;
+  detail: string | null;
+};
+
 type OrderLog = {
   id: number;
   date: string;
@@ -1119,6 +1137,37 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
   const [lockingOut, setLockingOut] = useState(false);
+  const [stopRules, setStopRules] = useState<StopRule[]>([]);
+  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+
+  function refreshStopRules() {
+    fetch("/api/tradovate/stop-rules").then((r) => r.json()).then(setStopRules);
+  }
+
+  async function addStopRule() {
+    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset || !stopRuleForm.newStopOffset) {
+      alert("Fill in account, entry price, trigger offset, and new stop offset (contract must be resolved too).");
+      return;
+    }
+    if (!confirm(`This will automatically move your stop once price moves ${stopRuleForm.triggerOffset} points in your favor — with NO manual confirmation. Tradovate's own API has documented cases of silently failing to actually move the order. Continue?`)) {
+      return;
+    }
+    await fetch("/api/tradovate/stop-rules", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        env: settings.tradovateEnv,
+        accountId: form.accountId,
+        symbol: resolvedSymbol.symbol,
+        direction: form.action === "Buy" ? "long" : "short",
+        entryPrice: stopRuleForm.entryPrice,
+        qty: form.qty,
+        triggerOffset: stopRuleForm.triggerOffset,
+        newStopOffset: stopRuleForm.newStopOffset,
+      }),
+    });
+    setStopRuleForm({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+    refreshStopRules();
+  }
 
   function refreshLockout() {
     fetch("/api/tradovate/lockout").then((r) => r.json()).then((d) => setLockout(d.active));
@@ -1143,7 +1192,8 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   useEffect(() => {
     refreshLockout();
-    const interval = setInterval(refreshLockout, 30000);
+    refreshStopRules();
+    const interval = setInterval(() => { refreshLockout(); refreshStopRules(); }, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1361,6 +1411,57 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(120)}>Lock 2 hours</button>
             <button className="btn small ghost" disabled={!!lockout || lockingOut} onClick={() => triggerLockout(undefined, true)}>Lock rest of day</button>
           </div>
+        </div>
+
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
+          <div className="card-label" style={{ marginBottom: 8 }}>AUTOMATIC STOP MANAGEMENT</div>
+          <div className="panel-desc" style={{ marginTop: 0 }}>
+            Once price moves a set number of points in your favor, this automatically moves your stop to lock in profit —
+            no manual click, no confirmation.
+          </div>
+          <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
+            ⚠ Tradovate's own API has documented, unresolved cases of reporting a successful modification when the stop
+            did not actually move. This app verifies afterward and will flag it loudly if that happens — but the
+            modification itself runs with no human confirmation. Checked on a schedule (however often your cron job
+            pings), not instantly.
+          </div>
+          <div className="grid3">
+            <div className="field"><label>Entry Price</label>
+              <input type="number" step="0.25" value={stopRuleForm.entryPrice} onChange={(e) => setStopRuleForm({ ...stopRuleForm, entryPrice: e.target.value })} placeholder="e.g. 28777" />
+            </div>
+            <div className="field"><label>Trigger (pts in your favor)</label>
+              <input type="number" step="0.25" value={stopRuleForm.triggerOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, triggerOffset: e.target.value })} placeholder="e.g. 11" />
+            </div>
+            <div className="field"><label>New Stop (pts from entry)</label>
+              <input type="number" step="0.25" value={stopRuleForm.newStopOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, newStopOffset: e.target.value })} placeholder="e.g. 4" />
+            </div>
+          </div>
+          <button className="btn small ghost" style={{ borderColor: "var(--red)", color: "var(--red)" }} onClick={addStopRule}>Create Auto-Stop Rule</button>
+
+          {stopRules.length > 0 && (
+            <div style={{ marginTop: 14, overflowX: "auto" }}>
+              <table>
+                <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Trigger</th><th>New Stop</th><th>Status</th><th>Detail</th></tr></thead>
+                <tbody>
+                  {stopRules.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.symbol}</td>
+                      <td>{r.direction.toUpperCase()}</td>
+                      <td>{r.entryPrice.toFixed(2)}</td>
+                      <td>+{r.triggerOffset}</td>
+                      <td>{r.newStopPrice !== null ? r.newStopPrice.toFixed(2) : `entry+${r.newStopOffset}`}</td>
+                      <td>
+                        <span className={`tag ${r.status === "triggered" && r.verified ? "clean" : r.status === "active" ? "long" : "flag"}`}>
+                          {r.status === "triggered" ? (r.verified ? "MOVED ✓" : "UNVERIFIED ⚠") : r.status.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ maxWidth: 240, whiteSpace: "normal" }}>{r.detail || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {result && (

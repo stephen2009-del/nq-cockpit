@@ -162,6 +162,54 @@ export async function getPositions(env: Env, accountId: number) {
   return result;
 }
 
+// Finds the currently working (unfilled) Stop order for a given account +
+// symbol — this is what a Trail rule needs to modify. Filters Tradovate's
+// order list by status and contract name.
+export async function findWorkingStopOrder(env: Env, accountId: number, symbol: string) {
+  const result = await tradovateFetch(env, `/order/list?accountId=${accountId}`);
+  if (!result.ok || !Array.isArray(result.body)) return null;
+
+  const candidates = result.body.filter(
+    (o: any) => o.ordStatus === "Working" && (o.orderType === "Stop" || o.orderType === "StopLimit")
+  );
+  for (const order of candidates) {
+    const contract = await getContractName(env, order.contractId);
+    const name: string = contract.ok ? (contract.body.name || "") : "";
+    if (name.toUpperCase() === symbol.toUpperCase() || name.toUpperCase().startsWith(symbol.toUpperCase())) {
+      return { ...order, contractName: name };
+    }
+  }
+  return null;
+}
+
+// Modifies an existing stop order's trigger price.
+// IMPORTANT: Tradovate's own community forum has multiple confirmed reports
+// of this endpoint returning a success response (s:200) while the order's
+// actual price does NOT change. Never trust the response alone — always
+// re-fetch the order afterward to verify the price actually updated. That
+// verification happens in the calling code, not here.
+export async function modifyStopOrder(env: Env, orderId: number, orderQty: number, newStopPrice: number) {
+  const result = await tradovateFetch(env, "/order/modifyorder", {
+    method: "POST",
+    body: JSON.stringify({
+      orderId,
+      orderQty,
+      orderType: "Stop",
+      stopPrice: newStopPrice,
+      isAutomated: true,
+    }),
+  });
+  return result;
+}
+
+// Re-fetches a single order by ID — used immediately after modifyStopOrder
+// to confirm the price actually changed, given the documented unreliability
+// of trusting the modify response alone.
+export async function getOrderById(env: Env, orderId: number) {
+  const result = await tradovateFetch(env, `/order/item?id=${orderId}`);
+  return result;
+}
+
 export async function getContractName(env: Env, contractId: number) {
   const result = await tradovateFetch(env, `/contract/item?id=${contractId}`);
   return result;

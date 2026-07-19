@@ -99,3 +99,21 @@ model EmotionalLogEntry {
   tag  String?
   note String
 }
+
+model StopManagementRule {
+  id             Int       @id @default(autoincrement())
+  createdAt      DateTime  @default(now())
+  env            String
+  accountId      Int
+  symbol         String
+  direction      String    // "long" or "short"
+  entryPrice     Float
+  qty            Int
+  triggerOffset  Float     // points from entry that trigger the move
+  newStopOffset  Float     // points from entry for the new stop price
+  status         String    @default("active") // active | triggered | failed | cancelled
+  triggeredAt    DateTime?
+  newStopPrice   Float?
+  verified       Boolean?
+  detail         String?
+}
