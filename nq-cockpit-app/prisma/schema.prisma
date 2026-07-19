@@ -41,6 +41,7 @@ model Settings {
   cutoffMinutesBeforeClose Int @default(65)
   openingBufferMinutes Int    @default(10)
   tradovateEnv         String @default("demo")
+  tradingWindowLocked  Boolean @default(false)
 }
 
 model TradovateOrderLog {

@@ -32,6 +32,7 @@ type Settings = {
   cutoffMinutesBeforeClose: number;
   openingBufferMinutes: number;
   tradovateEnv: string;
+  tradingWindowLocked: boolean;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
@@ -116,7 +117,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo",
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false,
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -1872,24 +1873,48 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
       <div className="panel-box">
         <div className="panel-title">Trading Window Guard</div>
         <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window. All times are Eastern (ET), matching CME hours.</div>
+        {local.tradingWindowLocked && (
+          <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
+            🔒 These settings are locked and cannot be changed. There is no unlock option — this was a deliberate choice when you locked them.
+          </div>
+        )}
         <div className="grid3">
           <div className="field"><label>Window Start (ET)</label>
-            <input type="time" value={local.tradingWindowStart} onChange={(e) => setLocal({ ...local, tradingWindowStart: e.target.value })} />
+            <input type="time" value={local.tradingWindowStart} disabled={local.tradingWindowLocked} onChange={(e) => setLocal({ ...local, tradingWindowStart: e.target.value })} />
           </div>
           <div className="field"><label>Window End (ET)</label>
-            <input type="time" value={local.tradingWindowEnd} onChange={(e) => setLocal({ ...local, tradingWindowEnd: e.target.value })} />
+            <input type="time" value={local.tradingWindowEnd} disabled={local.tradingWindowLocked} onChange={(e) => setLocal({ ...local, tradingWindowEnd: e.target.value })} />
           </div>
           <div className="field"><label>Cutoff Before Close (minutes)</label>
-            <input type="number" value={local.cutoffMinutesBeforeClose} onChange={(e) => setLocal({ ...local, cutoffMinutesBeforeClose: parseInt(e.target.value) || 0 })} />
+            <input type="number" value={local.cutoffMinutesBeforeClose} disabled={local.tradingWindowLocked} onChange={(e) => setLocal({ ...local, cutoffMinutesBeforeClose: parseInt(e.target.value) || 0 })} />
           </div>
           <div className="field"><label>Block First N Minutes After Open</label>
-            <input type="number" value={local.openingBufferMinutes} onChange={(e) => setLocal({ ...local, openingBufferMinutes: parseInt(e.target.value) || 0 })} />
+            <input type="number" value={local.openingBufferMinutes} disabled={local.tradingWindowLocked} onChange={(e) => setLocal({ ...local, openingBufferMinutes: parseInt(e.target.value) || 0 })} />
           </div>
         </div>
         <div className="card-sub" style={{ marginBottom: 12 }}>
           Effective allowed window: {addMinutesLabel(local.tradingWindowStart, local.openingBufferMinutes)} – {addMinutesLabel(local.tradingWindowEnd, -local.cutoffMinutesBeforeClose)} ET
         </div>
-        <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+        {local.tradingWindowLocked ? (
+          <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+        ) : (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+            <button
+              className="btn small ghost"
+              style={{ borderColor: "var(--red)", color: "var(--red)" }}
+              onClick={() => {
+                if (confirm("Lock the Trading Window Guard permanently? You will NOT be able to change the start time, end time, cutoff, or opening buffer ever again through this app. This cannot be undone.")) {
+                  const updated = { ...local, tradingWindowLocked: true };
+                  setLocal(updated);
+                  onSave(updated);
+                }
+              }}
+            >
+              🔒 Lock These Settings Permanently
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="panel-box">
