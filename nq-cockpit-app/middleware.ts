@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// These two endpoints are hit by external cron services (cron-job.org), not
+// a browser — they can't supply a Basic Auth login. They're already
+// protected by their own `?key=CRON_SECRET` check inside the route itself,
+// so it's safe to let them skip the site-wide login here.
+const CRON_BYPASS_PATHS = ["/api/cron/daily-report", "/api/tradovate/stop-rules/check"];
+
 export function middleware(req: NextRequest) {
+  if (CRON_BYPASS_PATHS.some((path) => req.nextUrl.pathname === path)) {
+    return NextResponse.next();
+  }
+
   const user = process.env.APP_USERNAME;
   const pass = process.env.APP_PASSWORD;
 
