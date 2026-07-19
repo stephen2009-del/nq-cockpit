@@ -92,15 +92,15 @@ export function getTradingWindowStatus(
       etLabel,
     };
   }
+  if (current >= end) {
+    return { allowed: false, reason: `Outside your trading window — closed at ${minutesToLabel(end)} ET. Opens again at ${minutesToLabel(effectiveStart)} ET.`, etLabel };
+  }
   if (current >= cutoff) {
     return {
       allowed: false,
       reason: `Within the final ${settings.cutoffMinutesBeforeClose} minutes before close — cutoff was ${minutesToLabel(cutoff)} ET.`,
       etLabel,
     };
-  }
-  if (current >= end) {
-    return { allowed: false, reason: `Outside your trading window — closed at ${minutesToLabel(end)} ET.`, etLabel };
   }
   return { allowed: true, reason: `Trading window open until ${minutesToLabel(cutoff)} ET.`, etLabel };
 }
