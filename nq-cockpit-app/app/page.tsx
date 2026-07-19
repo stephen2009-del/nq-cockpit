@@ -340,6 +340,14 @@ export default function Page() {
 
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
+  const RISK_TAGS = ["FOMO", "Tilted / Revenge", "Overconfident", "Doubt"];
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  const recentRiskyEntries = emoEntries.filter((e) => new Date(e.date) >= sevenDaysAgo && e.tag && RISK_TAGS.includes(e.tag));
+  const riskyTagCounts: Record<string, number> = {};
+  recentRiskyEntries.forEach((e) => { riskyTagCounts[e.tag!] = (riskyTagCounts[e.tag!] || 0) + 1; });
+  const showRiskyBanner = recentRiskyEntries.length >= 3;
+
   return (
     <div className="wrap">
       <div className="header">
@@ -349,6 +357,14 @@ export default function Page() {
         </div>
         <div className="subhead">{new Date().toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</div>
       </div>
+
+      {showRiskyBanner && (
+        <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 16 }}>
+          ⚠ {recentRiskyEntries.length} FOMO/Tilted/Overconfident/Doubt entries logged in the last 7 days
+          ({Object.entries(riskyTagCounts).map(([tag, count]) => `${tag}: ${count}`).join(" · ")}).
+          Check Dashboard → Emotional Patterns for how those days actually performed.
+        </div>
+      )}
 
       <div className="strip">
         <div className="gauge-card">
@@ -527,7 +543,7 @@ export default function Page() {
         </div>
       )}
 
-      {tab === "dashboard" && <Dashboard trades={trades} />}
+      {tab === "dashboard" && <Dashboard trades={trades} emoEntries={emoEntries} />}
 
       {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
 
@@ -1814,9 +1830,14 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
   );
 }
 
-function Dashboard({ trades }: { trades: Trade[] }) {
+function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: EmotionalEntry[] }) {
   if (trades.length === 0) {
-    return <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>;
+    return (
+      <>
+        <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>
+        <EmotionalPatternsPanel trades={trades} emoEntries={emoEntries} />
+      </>
+    );
   }
   const wins = trades.filter((t) => t.pnl > 0).length;
   const losses = trades.filter((t) => t.pnl < 0).length;
@@ -1906,7 +1927,102 @@ function Dashboard({ trades }: { trades: Trade[] }) {
         <div className="panel-title">By Emotional State</div>
         <BreakdownTable stats={emotionStats} />
       </div>
+
+      <EmotionalPatternsPanel trades={trades} emoEntries={emoEntries} />
     </>
+  );
+}
+
+function EmotionalPatternsPanel({ trades, emoEntries }: { trades: Trade[]; emoEntries: EmotionalEntry[] }) {
+  if (emoEntries.length === 0) {
+    return (
+      <div className="panel-box">
+        <div className="panel-title">Emotional Patterns</div>
+        <div className="empty-state"><div className="big">🧠</div>No Emotional Journal entries yet. Log a few on the Emotional Journal tab to see your patterns here.</div>
+      </div>
+    );
+  }
+
+  const tagCounts: Record<string, number> = {};
+  emoEntries.forEach((e) => { if (e.tag) tagCounts[e.tag] = (tagCounts[e.tag] || 0) + 1; });
+  const sortedTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]);
+  const maxCount = Math.max(...sortedTags.map(([, c]) => c), 1);
+
+  const tradeDays = groupTradesByDay(trades);
+  const tradeDayMap = new Map(tradeDays.map((d) => [d.dateStr, d]));
+
+  const entryDays = new Map<string, EmotionalEntry[]>();
+  emoEntries.forEach((e) => {
+    const key = new Date(e.date).toDateString();
+    if (!entryDays.has(key)) entryDays.set(key, []);
+    entryDays.get(key)!.push(e);
+  });
+
+  const RISK_TAGS = ["FOMO", "Tilted / Revenge", "Overconfident", "Doubt"];
+  const riskyDayPnls: number[] = [];
+  const calmDayPnls: number[] = [];
+  tradeDays.forEach((day) => {
+    const dayEntries = entryDays.get(day.dateStr) || [];
+    const hasRisky = dayEntries.some((e) => e.tag && RISK_TAGS.includes(e.tag));
+    if (hasRisky) riskyDayPnls.push(day.pnl);
+    else calmDayPnls.push(day.pnl);
+  });
+  const avgRisky = riskyDayPnls.length ? riskyDayPnls.reduce((a, b) => a + b, 0) / riskyDayPnls.length : null;
+  const avgCalm = calmDayPnls.length ? calmDayPnls.reduce((a, b) => a + b, 0) / calmDayPnls.length : null;
+
+  const dayRows = Array.from(entryDays.entries())
+    .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
+    .slice(0, 14);
+
+  return (
+    <div className="panel-box">
+      <div className="panel-title">Emotional Patterns</div>
+      <div className="panel-desc">From your Emotional Journal — what you're actually feeling, cross-referenced with what actually happened that day.</div>
+
+      <div className="card-label" style={{ marginTop: 8, marginBottom: 8 }}>TAG FREQUENCY (LAST 14 DAYS)</div>
+      <div className="compare-bars" style={{ marginBottom: 20 }}>
+        {sortedTags.map(([tag, count]) => (
+          <div className="compare-row" key={tag}>
+            <div className="compare-lbl">{tag}</div>
+            <div className="compare-track"><div className="compare-fill" style={{ width: `${(count / maxCount) * 100}%`, background: RISK_TAGS.includes(tag) ? "var(--red)" : "var(--cyan)" }} /></div>
+            <div className="compare-val">{count}</div>
+          </div>
+        ))}
+      </div>
+
+      {avgRisky !== null && avgCalm !== null && (
+        <>
+          <div className="card-label" style={{ marginBottom: 8 }}>DAYS WITH FOMO / TILTED / OVERCONFIDENT / DOUBT VS. OTHER DAYS</div>
+          <div className="stat-grid" style={{ marginBottom: 20 }}>
+            <div className="stat-box"><div className={`stat-num ${avgRisky >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(avgRisky)}</div><div className="stat-lbl">Avg P&amp;L, risky-tag days ({riskyDayPnls.length})</div></div>
+            <div className="stat-box"><div className={`stat-num ${avgCalm >= 0 ? "pnl-pos" : "pnl-neg"}`}>{fmtMoney(avgCalm)}</div><div className="stat-lbl">Avg P&amp;L, other trading days ({calmDayPnls.length})</div></div>
+          </div>
+        </>
+      )}
+
+      <div className="card-label" style={{ marginBottom: 8 }}>RECENT DAYS</div>
+      <div style={{ overflowX: "auto" }}>
+        <table>
+          <thead><tr><th>Date</th><th>Tags Logged</th><th>That Day's P&amp;L</th><th>Trades</th></tr></thead>
+          <tbody>
+            {dayRows.map(([dateStr, entries]) => {
+              const tradeDay = tradeDayMap.get(dateStr);
+              const uniqueTags = Array.from(new Set(entries.map((e) => e.tag).filter(Boolean))) as string[];
+              return (
+                <tr key={dateStr}>
+                  <td>{dateStr}</td>
+                  <td>{uniqueTags.length ? uniqueTags.map((t) => (
+                    <span key={t} className="mini-tag" style={RISK_TAGS.includes(t) ? { borderColor: "var(--red)", color: "var(--red)" } : { borderColor: "var(--cyan)", color: "var(--cyan)" }}>{t}</span>
+                  )) : "—"}</td>
+                  <td className={tradeDay ? (tradeDay.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>{tradeDay ? fmtMoney(tradeDay.pnl) : "no trades"}</td>
+                  <td>{tradeDay ? tradeDay.trades.length : 0}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
