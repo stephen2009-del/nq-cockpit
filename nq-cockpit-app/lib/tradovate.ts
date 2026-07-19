@@ -252,6 +252,32 @@ export async function findOpenPosition(env: Env, accountId: number, symbol: stri
   return null;
 }
 
+// Tradovate's own risk engine already knows whether a position is winning or
+// losing (that's what it uses for margin calculations) — no market data
+// subscription needed for that, since it's their internal number, not a
+// live quote feed to us. This tries several plausible field names for a
+// per-position P&L figure. NOT verified against a real response — if this
+// always returns null, check a real position's raw JSON (log it) and tell
+// me what the actual field is called, and this gets a one-line fix.
+export function extractPositionPnl(position: any): number | null {
+  const candidates = ["openPL", "unrealizedPnl", "unrealizedPL", "pnl", "plValue", "profitLoss"];
+  for (const key of candidates) {
+    if (typeof position[key] === "number") return position[key];
+  }
+  return null;
+}
+
+// Same idea, at the account level (total open P&L across all positions) —
+// used as a secondary fallback if the position itself doesn't expose one.
+export function extractAccountOpenPnl(cashBalance: any): number | null {
+  if (!cashBalance) return null;
+  const candidates = ["openPL", "unrealizedPl", "dayPl", "pnl"];
+  for (const key of candidates) {
+    if (typeof cashBalance[key] === "number") return cashBalance[key];
+  }
+  return null;
+}
+
 export async function placeOrder(
   env: Env,
   params: {

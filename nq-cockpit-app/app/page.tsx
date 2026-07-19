@@ -1220,7 +1220,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       <div className="panel-box">
         <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
         <div className="panel-desc">
-          Orders placed here go through Tradovate's API and are blocked automatically outside your Trading Window Guard settings, or if they'd add to an open losing position (checked against your most recent Pre-Market/Intraday price).
+          Orders placed here go through Tradovate's API and are blocked automatically outside your Trading Window Guard settings, or if they'd add to an open losing position (using Tradovate's own P&L data when available, falling back to your most recent logged price otherwise).
           {settings.tradovateEnv === "live" && (
             <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
           )}
