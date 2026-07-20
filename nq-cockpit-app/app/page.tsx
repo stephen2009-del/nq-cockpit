@@ -1260,7 +1260,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
-  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null }[]>([]);
+  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
@@ -1426,7 +1426,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       <div className="panel-box">
         <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
         <div className="panel-desc">
-          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position — checked using Tradovate's own P&L data when available, then this order's own Limit price, then your last logged Intraday/Pre-Market price. The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
+          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position — checked using Tradovate's own P&L data when available, otherwise requiring an Intraday check logged within the last 10 minutes. No fresh check, no Tradovate data — the add is blocked outright. The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
           {settings.tradovateEnv === "live" && (
             <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
           )}
@@ -1646,22 +1646,26 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           <table>
             <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Source</th></tr></thead>
             <tbody>
-              {currentPositions.map((p, i) => (
-                <tr key={i}>
-                  <td>{p.symbol}</td>
-                  <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
-                  <td>{p.netPrice?.toFixed(2)}</td>
-                  <td className={p.pnl !== null && Number.isFinite(p.pnl) ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
-                    {p.pnl !== null && Number.isFinite(p.pnl) ? fmtMoney(p.pnl) : "— (no data available)"}
-                  </td>
-                  <td className="card-sub" style={{ marginTop: 0 }}>
-                    {p.pnlSource === "position" ? "Tradovate (position)" :
-                     p.pnlSource === "account" ? "Tradovate (account)" :
-                     p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)}` :
-                     "No price logged"}
-                  </td>
-                </tr>
-              ))}
+              {currentPositions.map((p, i) => {
+                const isStale = p.pnlSource === "estimated" && p.loggedPriceAgeMinutes !== null && p.loggedPriceAgeMinutes > 10;
+                return (
+                  <tr key={i}>
+                    <td>{p.symbol}</td>
+                    <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
+                    <td>{p.netPrice?.toFixed(2)}</td>
+                    <td className={p.pnl !== null && Number.isFinite(p.pnl) ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
+                      {p.pnl !== null && Number.isFinite(p.pnl) ? fmtMoney(p.pnl) : "— (no data available)"}
+                      {isStale && <div style={{ color: "var(--red)", fontSize: 11, marginTop: 2 }}>⚠ STALE — {p.loggedPriceAgeMinutes!.toFixed(0)} min old, do not trust this number</div>}
+                    </td>
+                    <td className="card-sub" style={{ marginTop: 0 }}>
+                      {p.pnlSource === "position" ? "Tradovate (position)" :
+                       p.pnlSource === "account" ? "Tradovate (account)" :
+                       p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)} (${p.loggedPriceAgeMinutes!.toFixed(0)} min ago)` :
+                       "No price logged"}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

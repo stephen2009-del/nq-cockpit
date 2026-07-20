@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPositions, getContractName, extractPositionPnl, getCashBalance, extractAccountOpenPnl } from "@/lib/tradovate";
 import { prisma } from "@/lib/prisma";
-import { getLastKnownNqPrice } from "@/lib/lastKnownPrice";
+import { getLastKnownNqPriceWithAge } from "@/lib/lastKnownPrice";
 
 export async function GET(req: NextRequest) {
   const env = (req.nextUrl.searchParams.get("env") || "demo") as "demo" | "live";
@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   let settings = await prisma.settings.findUnique({ where: { id: 1 } });
   if (!settings) settings = await prisma.settings.create({ data: { id: 1 } });
 
-  const loggedPrice = await getLastKnownNqPrice();
+  const loggedPriceInfo = await getLastKnownNqPriceWithAge();
 
   const open = result.body.filter((p: any) => p.netPos && p.netPos !== 0);
   const enriched = await Promise.all(
@@ -41,9 +41,9 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      if (pnl === null && loggedPrice !== null) {
+      if (pnl === null && loggedPriceInfo !== null) {
         const direction = p.netPos > 0 ? 1 : -1;
-        pnl = direction * (loggedPrice - p.netPrice) * settings.multiplier * Math.abs(p.netPos);
+        pnl = direction * (loggedPriceInfo.price - p.netPrice) * settings.multiplier * Math.abs(p.netPos);
         pnlSource = "estimated";
       }
 
@@ -53,7 +53,8 @@ export async function GET(req: NextRequest) {
         netPrice: p.netPrice,
         pnl,
         pnlSource,
-        loggedPrice,
+        loggedPrice: loggedPriceInfo?.price ?? null,
+        loggedPriceAgeMinutes: loggedPriceInfo?.ageMinutes ?? null,
       };
     })
   );

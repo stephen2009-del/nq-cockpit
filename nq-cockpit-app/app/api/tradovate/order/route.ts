@@ -5,7 +5,7 @@ import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
-import { getLastKnownNqPrice } from "@/lib/lastKnownPrice";
+import { getFreshIntradayPrice, FRESHNESS_MINUTES } from "@/lib/lastKnownPrice";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -79,8 +79,16 @@ export async function POST(req: NextRequest) {
   // SECOND AUTHORITATIVE CHECK — no adding to a losing position.
   // Prefers Tradovate's OWN computed P&L (position-level, then account-level)
   // since that's the broker's real number, not something we're inferring.
-  // Only falls back to your last logged Intraday/Pre-Market price if
-  // Tradovate doesn't expose either one.
+  //
+  // We do NOT trust the order's own submitted price anymore — that was
+  // tried and it failed a real test: a limit price equal to the original
+  // entry read as "flat" when the real market had already moved against
+  // the position. An order's price reflects where you want to trade, not
+  // necessarily where the market actually is.
+  //
+  // The only remaining fallback is a FRESH (logged within the last
+  // FRESHNESS_MINUTES) Intraday check. No fresh check, no fallback — this
+  // fails closed rather than guessing.
   try {
     const position = await findOpenPosition(env, parseInt(accountId), symbol);
     if (position && position.netPos !== 0) {
@@ -92,7 +100,7 @@ export async function POST(req: NextRequest) {
       // availability — there's nothing to protect against there.
       if (newDirection === existingDirection) {
         let directPnl = extractPositionPnl(position);
-        let pnlSource: "position" | "account" | "order_price" | "logged_price" = "position";
+        let pnlSource: "position" | "account" | "logged_price" = "position";
 
         if (directPnl === null) {
           const cashResult = await getCashBalance(env, parseInt(accountId));
@@ -103,32 +111,21 @@ export async function POST(req: NextRequest) {
         }
 
         let currentPrice: number | undefined;
+        let priceAgeMinutes: number | undefined;
 
-        // The order itself may already contain a real, current price — the
-        // Limit price you just typed in. That's more immediately relevant
-        // than a separately logged Intraday check, and it's already in
-        // hand with zero extra steps, so it's checked first.
-        if (directPnl === null && orderType === "Limit" && price) {
-          const submittedPrice = parseFloat(price);
-          if (Number.isFinite(submittedPrice)) {
-            currentPrice = submittedPrice;
-            pnlSource = "order_price";
+        if (directPnl === null) {
+          pnlSource = "logged_price";
+          const fresh = await getFreshIntradayPrice();
+          if (fresh) {
+            currentPrice = fresh.price;
+            priceAgeMinutes = fresh.ageMinutes;
           }
         }
 
         if (directPnl === null && currentPrice === undefined) {
-          pnlSource = "logged_price";
-          const safePrice = await getLastKnownNqPrice();
-          currentPrice = safePrice ?? undefined;
-        }
-
-        if (directPnl === null && currentPrice === undefined) {
-          // FAIL CLOSED: we cannot determine whether this position is
-          // winning or losing from any source (Tradovate position P&L,
-          // Tradovate account P&L, the order's own price, or your logged
-          // price). Rather than silently letting an unverifiable "add to
-          // position" order through, block it and say exactly why.
-          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no data available from Tradovate's position P&L, account P&L, this order's price, or your logged prices. Blocking this add as a precaution.`;
+          // FAIL CLOSED: no Tradovate P&L, and no Intraday check logged
+          // within the freshness window. Block rather than guess.
+          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no Tradovate P&L available, and no Intraday check logged within the last ${FRESHNESS_MINUTES} minutes. Log a fresh Intraday check and try again.`;
           await prisma.tradovateOrderLog.create({
             data: {
               env, symbol, side: action, qty: parseInt(orderQty), orderType,
@@ -145,6 +142,7 @@ export async function POST(req: NextRequest) {
           existingNetPrice: position.netPrice,
           newOrderSide: action,
           currentPrice,
+          priceAgeMinutes,
           directPnl,
           pnlSource,
         });

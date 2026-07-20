@@ -9,10 +9,11 @@ export function checkAddingToLoser(params: {
   existingNetPrice: number;
   newOrderSide: "Buy" | "Sell";
   currentPrice?: number;
+  priceAgeMinutes?: number;
   directPnl?: number | null;
-  pnlSource?: "position" | "account" | "order_price" | "logged_price";
+  pnlSource?: "position" | "account" | "logged_price";
 }): PositionGuardResult {
-  const { existingNetPos, existingNetPrice, newOrderSide, currentPrice, directPnl, pnlSource } = params;
+  const { existingNetPos, existingNetPrice, newOrderSide, currentPrice, priceAgeMinutes, directPnl, pnlSource } = params;
 
   if (existingNetPos === 0) {
     return { blocked: false, reason: null };
@@ -34,9 +35,8 @@ export function checkAddingToLoser(params: {
     sourceLabel = pnlSource === "account" ? "Tradovate account-level P&L" : "Tradovate's own position P&L";
   } else if (currentPrice !== undefined) {
     unrealized = existingDirection === "long" ? currentPrice - existingNetPrice : existingNetPrice - currentPrice;
-    sourceLabel = pnlSource === "order_price"
-      ? `the price on this order (${currentPrice.toFixed(2)}) — not live Tradovate data`
-      : `your last logged price (${currentPrice.toFixed(2)}) — not live Tradovate data`;
+    const ageText = priceAgeMinutes !== undefined ? `, logged ${priceAgeMinutes.toFixed(1)} min ago` : "";
+    sourceLabel = `your Intraday check (${currentPrice.toFixed(2)}${ageText}) — not live Tradovate data`;
   } else {
     // No data at all to judge this by — don't block on a guess.
     return { blocked: false, reason: null };
