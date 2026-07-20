@@ -1260,6 +1260,8 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
+  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; directPnl: number | null }[]>([]);
+  const [positionsLoading, setPositionsLoading] = useState(false);
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
   const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
@@ -1297,6 +1299,16 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     fetch("/api/tradovate/lockout").then((r) => r.json()).then((d) => setLockout(d.active));
   }
 
+  function refreshPositions() {
+    if (!form.accountId) { setCurrentPositions([]); return; }
+    setPositionsLoading(true);
+    fetch(`/api/tradovate/positions?env=${settings.tradovateEnv}&accountId=${form.accountId}`)
+      .then((r) => r.json())
+      .then((d) => setCurrentPositions(d.positions || []))
+      .catch(() => setCurrentPositions([]))
+      .finally(() => setPositionsLoading(false));
+  }
+
   async function triggerLockout(minutes?: number, restOfDay?: boolean) {
     const label = restOfDay ? "the rest of the trading day" : `${minutes} minutes`;
     if (!confirm(`Lock trading for ${label}? This cannot be undone or canceled early once set.`)) return;
@@ -1317,9 +1329,13 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   useEffect(() => {
     refreshLockout();
     refreshStopRules();
-    const interval = setInterval(() => { refreshLockout(); refreshStopRules(); }, 30000);
+    const interval = setInterval(() => { refreshLockout(); refreshStopRules(); refreshPositions(); }, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    refreshPositions();
+  }, [form.accountId, settings.tradovateEnv]);
 
   useEffect(() => {
     const interval = setInterval(() => setWindowStatus(computeWindowStatus()), 15000);
@@ -1398,6 +1414,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         setResult({ type: "success", message: `Order submitted (${settings.tradovateEnv}). Tradovate order ID: ${data.result?.orderId ?? "pending"}` });
       }
       fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
+      setTimeout(refreshPositions, 2000);
     } catch (err: any) {
       setResult({ type: "error", message: err.message || String(err) });
     }
@@ -1612,6 +1629,33 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           >
             {result.message}
           </div>
+        )}
+      </div>
+
+      <div className="panel-box">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div className="panel-title" style={{ margin: 0 }}>Current Position — {settings.tradovateEnv.toUpperCase()}</div>
+          <button className="btn small ghost" onClick={refreshPositions} disabled={positionsLoading || !form.accountId}>{positionsLoading ? "Refreshing…" : "Refresh"}</button>
+        </div>
+        <div className="panel-desc">Pulled directly from Tradovate — this is what's actually open, not just what you submitted.</div>
+        {!form.accountId ? (
+          <div className="empty-state">Select an account above to see open positions.</div>
+        ) : currentPositions.length === 0 ? (
+          <div className="empty-state">No open positions on this account right now.</div>
+        ) : (
+          <table>
+            <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th></tr></thead>
+            <tbody>
+              {currentPositions.map((p, i) => (
+                <tr key={i}>
+                  <td>{p.symbol}</td>
+                  <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
+                  <td>{p.netPrice?.toFixed(2)}</td>
+                  <td className={p.directPnl !== null ? (p.directPnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>{p.directPnl !== null ? fmtMoney(p.directPnl) : "— (no direct P&L field found)"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 
