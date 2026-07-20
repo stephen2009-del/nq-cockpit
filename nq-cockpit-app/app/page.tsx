@@ -1260,7 +1260,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
-  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; directPnl: number | null }[]>([]);
+  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
@@ -1637,21 +1637,29 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           <div className="panel-title" style={{ margin: 0 }}>Current Position — {settings.tradovateEnv.toUpperCase()}</div>
           <button className="btn small ghost" onClick={refreshPositions} disabled={positionsLoading || !form.accountId}>{positionsLoading ? "Refreshing…" : "Refresh"}</button>
         </div>
-        <div className="panel-desc">Pulled directly from Tradovate — this is what's actually open, not just what you submitted.</div>
+        <div className="panel-desc">Pulled directly from Tradovate — this is what's actually open, not just what you submitted. Tradovate doesn't expose live P&amp;L without a market data subscription (confirmed — not available on this account), so P&amp;L here is estimated from your last logged price where a direct figure isn't available.</div>
         {!form.accountId ? (
           <div className="empty-state">Select an account above to see open positions.</div>
         ) : currentPositions.length === 0 ? (
           <div className="empty-state">No open positions on this account right now.</div>
         ) : (
           <table>
-            <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Source</th></tr></thead>
             <tbody>
               {currentPositions.map((p, i) => (
                 <tr key={i}>
                   <td>{p.symbol}</td>
                   <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
                   <td>{p.netPrice?.toFixed(2)}</td>
-                  <td className={p.directPnl !== null ? (p.directPnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>{p.directPnl !== null ? fmtMoney(p.directPnl) : "— (no direct P&L field found)"}</td>
+                  <td className={p.pnl !== null ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
+                    {p.pnl !== null ? fmtMoney(p.pnl) : "— (no data available)"}
+                  </td>
+                  <td className="card-sub" style={{ marginTop: 0 }}>
+                    {p.pnlSource === "position" ? "Tradovate (position)" :
+                     p.pnlSource === "account" ? "Tradovate (account)" :
+                     p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)}` :
+                     "No price logged"}
+                  </td>
                 </tr>
               ))}
             </tbody>

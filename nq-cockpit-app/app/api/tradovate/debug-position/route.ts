@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPositions, getAccounts } from "@/lib/tradovate";
+import { getPositions, getAccounts, getCashBalance } from "@/lib/tradovate";
 
 // TEMPORARY debug tool. Shows the exact raw JSON Tradovate returns for your
-// positions, so we can see what they actually call the P&L field instead of
-// guessing. Safe to leave in (read-only, no orders placed) but fine to
-// delete once we've found the field name.
+// positions AND cash balance, so we can see what fields actually exist
+// instead of guessing. Safe to leave in (read-only, no orders placed) but
+// fine to delete once we've confirmed what's available.
 export async function GET(req: NextRequest) {
   const env = (req.nextUrl.searchParams.get("env") || "demo") as "demo" | "live";
   const accountParam = req.nextUrl.searchParams.get("accountId") || "";
 
   let accountId = parseInt(accountParam);
 
-  // If it wasn't a plain number, treat it as an account name (e.g.
-  // "DEMO95538") and resolve it to the numeric ID Tradovate actually uses.
   if (isNaN(accountId)) {
     const accountsResult = await getAccounts(env);
     if (!accountsResult.ok || !Array.isArray(accountsResult.body)) {
@@ -28,6 +26,10 @@ export async function GET(req: NextRequest) {
     accountId = match.id;
   }
 
-  const result = await getPositions(env, accountId);
-  return NextResponse.json({ resolvedAccountId: accountId, ...result }, { status: 200 });
+  const [positions, cashBalance] = await Promise.all([
+    getPositions(env, accountId),
+    getCashBalance(env, accountId),
+  ]);
+
+  return NextResponse.json({ resolvedAccountId: accountId, positions, cashBalance }, { status: 200 });
 }
