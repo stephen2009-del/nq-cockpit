@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 import { getTradingWindowStatus } from "@/lib/tradingWindow";
-import { matchFillsToTrades, MatchedTrade } from "@/lib/fifoMatch";
+import { matchFillsToTrades, MatchedTrade, analyzeHoldTimes } from "@/lib/fifoMatch";
 
 type Rule = { id: number; text: string; order: number };
 type Trade = {
@@ -1887,6 +1887,7 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
   const wins = matchedTrades.filter((t) => t.pnl > 0).length;
   const winRate = matchedTrades.length ? Math.round((wins / matchedTrades.length) * 100) : 0;
   const accountLabel = `${settings.tradovateEnv.toUpperCase()} account ${accounts.find((a) => String(a.id) === accountId)?.name || accountId}`;
+  const holdAnalysis = analyzeHoldTimes(matchedTrades);
 
   const chart = matchedTrades.length > 1 ? equityCurvePoints(matchedTrades, 900, 180, 10) : null;
 
@@ -1928,6 +1929,35 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
               <div className="stat-box"><div className="stat-num">{data.cashBalance?.netLiq !== undefined ? fmtMoney(data.cashBalance.netLiq) : "—"}</div><div className="stat-lbl">Net Liquidity (live)</div></div>
             </div>
           </div>
+
+          {matchedTrades.length >= 4 && (
+            <div className="panel-box">
+              <div className="panel-title">Discipline Callouts</div>
+              <div className="panel-desc">Based on real fill timestamps from Tradovate — how long you actually held winners vs. losers, not self-reported.</div>
+              {holdAnalysis.patternFlag && (
+                <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 10 }}>
+                  ⚠ {holdAnalysis.patternFlag}
+                </div>
+              )}
+              {holdAnalysis.avgWinnerHoldMinutes !== null && holdAnalysis.avgLoserHoldMinutes !== null && (
+                <div className="stat-grid" style={{ marginBottom: holdAnalysis.flaggedTrades.length ? 14 : 0 }}>
+                  <div className="stat-box"><div className="stat-num pnl-pos">{holdAnalysis.avgWinnerHoldMinutes.toFixed(1)} min</div><div className="stat-lbl">Avg time in winners</div></div>
+                  <div className="stat-box"><div className="stat-num pnl-neg">{holdAnalysis.avgLoserHoldMinutes.toFixed(1)} min</div><div className="stat-lbl">Avg time in losers</div></div>
+                </div>
+              )}
+              {holdAnalysis.flaggedTrades.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {holdAnalysis.flaggedTrades.map((f, i) => (
+                    <div key={i} className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)" }}>
+                      {new Date(f.trade.exitTime).toLocaleString()} — {f.trade.symbol} {f.trade.side.toUpperCase()} — {f.text}
+                    </div>
+                  ))}
+                </div>
+              ) : !holdAnalysis.patternFlag ? (
+                <div className="empty-state">No individual trades held unusually long relative to your winners yet.</div>
+              ) : null}
+            </div>
+          )}
 
           {chart && (
             <div className="panel-box">
