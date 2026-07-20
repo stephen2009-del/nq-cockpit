@@ -47,6 +47,12 @@ export async function GET(req: NextRequest) {
         pnlSource = "estimated";
       }
 
+      // Tradovate's own timestamp on the position record — used as a proxy
+      // for "time since this position was last opened/changed", so we can
+      // flag a real-time "you've been holding this loser a while" warning
+      // instead of only reporting on it after the fact.
+      const openSinceMinutes = p.timestamp ? (Date.now() - new Date(p.timestamp).getTime()) / 60000 : null;
+
       return {
         symbol,
         netPos: p.netPos,
@@ -55,6 +61,7 @@ export async function GET(req: NextRequest) {
         pnlSource,
         loggedPrice: loggedPriceInfo?.price ?? null,
         loggedPriceAgeMinutes: loggedPriceInfo?.ageMinutes ?? null,
+        openSinceMinutes,
       };
     })
   );

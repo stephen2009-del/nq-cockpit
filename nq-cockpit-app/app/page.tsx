@@ -42,6 +42,10 @@ type IntradayCheckT = { id: number; date: string; qqqPrice: number; nqPrice: num
 type EmotionalEntry = { id: number; date: string; tag: string | null; note: string };
 
 const CONTRACTS: Record<string, number | null> = { NQ: 20, MNQ: 2, ES: 50, MES: 5, CUSTOM: null };
+// Minutes a losing position can sit open before Current Position starts
+// warning you directly — tuned to catch "hoping it comes back" before it
+// turns into a much bigger loss.
+const HOLDING_LOSER_WARNING_MINUTES = 15;
 
 function fmtMoney(n: number) {
   const sign = n < 0 ? "-" : "";
@@ -1260,7 +1264,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
-  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null }[]>([]);
+  const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null; openSinceMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
@@ -1643,31 +1647,43 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         ) : currentPositions.length === 0 ? (
           <div className="empty-state">No open positions on this account right now.</div>
         ) : (
-          <table>
-            <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Source</th></tr></thead>
-            <tbody>
-              {currentPositions.map((p, i) => {
-                const isStale = p.pnlSource === "estimated" && p.loggedPriceAgeMinutes !== null && p.loggedPriceAgeMinutes > 10;
-                return (
-                  <tr key={i}>
-                    <td>{p.symbol}</td>
-                    <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
-                    <td>{p.netPrice?.toFixed(2)}</td>
-                    <td className={p.pnl !== null && Number.isFinite(p.pnl) ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
-                      {p.pnl !== null && Number.isFinite(p.pnl) ? fmtMoney(p.pnl) : "— (no data available)"}
-                      {isStale && <div style={{ color: "var(--red)", fontSize: 11, marginTop: 2 }}>⚠ STALE — {p.loggedPriceAgeMinutes!.toFixed(0)} min old, do not trust this number</div>}
-                    </td>
-                    <td className="card-sub" style={{ marginTop: 0 }}>
-                      {p.pnlSource === "position" ? "Tradovate (position)" :
-                       p.pnlSource === "account" ? "Tradovate (account)" :
-                       p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)} (${p.loggedPriceAgeMinutes!.toFixed(0)} min ago)` :
-                       "No price logged"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <>
+            {currentPositions.filter((p) => p.pnl !== null && Number.isFinite(p.pnl) && p.pnl < 0 && p.openSinceMinutes !== null && p.openSinceMinutes > HOLDING_LOSER_WARNING_MINUTES).map((p, i) => (
+              <div key={i} className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.15)", marginBottom: 10, fontWeight: 600 }}>
+                🔴 You've been holding {p.symbol} at a loss for {p.openSinceMinutes!.toFixed(0)} minutes. This is the exact pattern you said you have — letting a loser run hoping it comes back. It came back today. What's your actual plan right now if it doesn't?
+              </div>
+            ))}
+            <table>
+              <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Time in Trade</th><th>Source</th></tr></thead>
+              <tbody>
+                {currentPositions.map((p, i) => {
+                  const isStale = p.pnlSource === "estimated" && p.loggedPriceAgeMinutes !== null && p.loggedPriceAgeMinutes > 10;
+                  const isLongHeldLoser = p.pnl !== null && Number.isFinite(p.pnl) && p.pnl < 0 && p.openSinceMinutes !== null && p.openSinceMinutes > HOLDING_LOSER_WARNING_MINUTES;
+                  return (
+                    <tr key={i}>
+                      <td>{p.symbol}</td>
+                      <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
+                      <td>{p.netPrice?.toFixed(2)}</td>
+                      <td className={p.pnl !== null && Number.isFinite(p.pnl) ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
+                        {p.pnl !== null && Number.isFinite(p.pnl) ? fmtMoney(p.pnl) : "— (no data available)"}
+                        {isStale && <div style={{ color: "var(--red)", fontSize: 11, marginTop: 2 }}>⚠ STALE — {p.loggedPriceAgeMinutes!.toFixed(0)} min old, do not trust this number</div>}
+                      </td>
+                      <td style={isLongHeldLoser ? { color: "var(--red)", fontWeight: 600 } : undefined}>
+                        {p.openSinceMinutes !== null ? `${p.openSinceMinutes.toFixed(0)} min` : "—"}
+                        {isLongHeldLoser && " ⚠"}
+                      </td>
+                      <td className="card-sub" style={{ marginTop: 0 }}>
+                        {p.pnlSource === "position" ? "Tradovate (position)" :
+                         p.pnlSource === "account" ? "Tradovate (account)" :
+                         p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)} (${p.loggedPriceAgeMinutes!.toFixed(0)} min ago)` :
+                         "No price logged"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
 
