@@ -50,7 +50,11 @@ export async function POST(req: NextRequest) {
   // AUTHORITATIVE server-side check — this is what actually blocks the trade.
   // The UI also shows this status, but this check is the one that counts:
   // it runs regardless of what the browser sends or whether the UI was bypassed.
-  const windowStatus = getTradingWindowStatus(settings);
+  // Only enforced for Live — Demo is unrestricted by time, since it's for
+  // practice/testing and shouldn't be gated by the same real-money guard.
+  const windowStatus = env === "live"
+    ? getTradingWindowStatus(settings)
+    : { allowed: true, reason: "Demo — Trading Window Guard not enforced (Live only).", etLabel: "" };
 
   if (!windowStatus.allowed) {
     await prisma.tradovateOrderLog.create({

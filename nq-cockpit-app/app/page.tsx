@@ -1243,7 +1243,14 @@ type OrderLog = {
 };
 
 function TradeTicketTab({ settings }: { settings: Settings }) {
-  const [windowStatus, setWindowStatus] = useState(() => getTradingWindowStatus(settings));
+  function computeWindowStatus() {
+    const raw = getTradingWindowStatus(settings);
+    if (settings.tradovateEnv !== "live") {
+      return { allowed: true, reason: "Demo — Trading Window Guard not enforced (Live only).", etLabel: raw.etLabel };
+    }
+    return raw;
+  }
+  const [windowStatus, setWindowStatus] = useState(computeWindowStatus);
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
   const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
@@ -1315,12 +1322,12 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }, []);
 
   useEffect(() => {
-    const interval = setInterval(() => setWindowStatus(getTradingWindowStatus(settings)), 15000);
+    const interval = setInterval(() => setWindowStatus(computeWindowStatus()), 15000);
     return () => clearInterval(interval);
   }, [settings]);
 
   useEffect(() => {
-    setWindowStatus(getTradingWindowStatus(settings));
+    setWindowStatus(computeWindowStatus());
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
       .then((r) => r.json())
       .then((d) => setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error }))
@@ -1402,7 +1409,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       <div className="panel-box">
         <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
         <div className="panel-desc">
-          Orders placed here go through Tradovate's API and are blocked automatically outside your Trading Window Guard settings, or if they'd add to an open losing position (using Tradovate's own P&L data when available, falling back to your most recent logged price otherwise).
+          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position (using Tradovate's own P&L data when available, falling back to your most recent logged price otherwise). The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
           {settings.tradovateEnv === "live" && (
             <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
           )}
@@ -2283,7 +2290,7 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
 
       <div className="panel-box">
         <div className="panel-title">Trading Window Guard</div>
-        <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window. All times are Eastern (ET), matching CME hours.</div>
+        <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window — <b>Live account only</b>. Demo is unrestricted by time. All times are Eastern (ET), matching CME hours.</div>
         {local.tradingWindowLocked && (
           <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
             🔒 These settings are locked and cannot be changed. There is no unlock option — this was a deliberate choice when you locked them.
