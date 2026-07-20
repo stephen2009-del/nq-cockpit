@@ -1939,10 +1939,10 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
                   ⚠ {holdAnalysis.patternFlag}
                 </div>
               )}
-              {holdAnalysis.avgWinnerHoldMinutes !== null && holdAnalysis.avgLoserHoldMinutes !== null && (
+              {(holdAnalysis.avgWinnerHoldMinutes !== null || holdAnalysis.avgLoserHoldMinutes !== null) && (
                 <div className="stat-grid" style={{ marginBottom: holdAnalysis.flaggedTrades.length ? 14 : 0 }}>
-                  <div className="stat-box"><div className="stat-num pnl-pos">{holdAnalysis.avgWinnerHoldMinutes.toFixed(1)} min</div><div className="stat-lbl">Avg time in winners</div></div>
-                  <div className="stat-box"><div className="stat-num pnl-neg">{holdAnalysis.avgLoserHoldMinutes.toFixed(1)} min</div><div className="stat-lbl">Avg time in losers</div></div>
+                  <div className="stat-box"><div className="stat-num pnl-pos">{holdAnalysis.avgWinnerHoldMinutes !== null ? `${holdAnalysis.avgWinnerHoldMinutes.toFixed(1)} min` : "—"}</div><div className="stat-lbl">Avg time in winners</div></div>
+                  <div className="stat-box"><div className="stat-num pnl-neg">{holdAnalysis.avgLoserHoldMinutes !== null ? `${holdAnalysis.avgLoserHoldMinutes.toFixed(1)} min` : "—"}</div><div className="stat-lbl">Avg time in losers</div></div>
                 </div>
               )}
               {holdAnalysis.flaggedTrades.length > 0 ? (
@@ -1954,7 +1954,11 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
                   ))}
                 </div>
               ) : !holdAnalysis.patternFlag ? (
-                <div className="empty-state">No individual trades held unusually long relative to your winners yet.</div>
+                <div className="empty-state">
+                  {holdAnalysis.avgLoserHoldMinutes === null
+                    ? "No losing trades in this data yet — nothing to compare hold times against. This section activates once you have at least one loser."
+                    : "No individual trades held unusually long relative to your winners yet."}
+                </div>
               ) : null}
             </div>
           )}
