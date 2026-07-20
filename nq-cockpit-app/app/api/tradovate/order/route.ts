@@ -83,34 +83,58 @@ export async function POST(req: NextRequest) {
   try {
     const position = await findOpenPosition(env, parseInt(accountId), symbol);
     if (position && position.netPos !== 0) {
-      let directPnl = extractPositionPnl(position);
-      let pnlSource: "position" | "account" | "logged_price" = "position";
+      const existingDirection = position.netPos > 0 ? "long" : "short";
+      const newDirection = action === "Buy" ? "long" : "short";
 
-      if (directPnl === null) {
-        const cashResult = await getCashBalance(env, parseInt(accountId));
-        if (cashResult.ok) {
-          directPnl = extractAccountOpenPnl(cashResult.body);
-          pnlSource = "account";
+      // Only same-direction orders ("adding") need any of this. Reducing,
+      // closing, or reversing is always allowed regardless of data
+      // availability — there's nothing to protect against there.
+      if (newDirection === existingDirection) {
+        let directPnl = extractPositionPnl(position);
+        let pnlSource: "position" | "account" | "logged_price" = "position";
+
+        if (directPnl === null) {
+          const cashResult = await getCashBalance(env, parseInt(accountId));
+          if (cashResult.ok) {
+            directPnl = extractAccountOpenPnl(cashResult.body);
+            pnlSource = "account";
+          }
         }
-      }
 
-      let currentPrice: number | undefined;
-      if (directPnl === null) {
-        pnlSource = "logged_price";
-        const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const lastCheck = await prisma.intradayCheck.findFirst({
-          where: { date: { gte: startOfDay } },
-          orderBy: { date: "desc" },
-        });
-        const todayPrep = await prisma.preMarketPrep.findFirst({
-          where: { date: { gte: startOfDay } },
-          orderBy: { date: "desc" },
-        });
-        currentPrice = lastCheck?.nqPrice ?? todayPrep?.nqPrice ?? undefined;
-      }
+        let currentPrice: number | undefined;
+        if (directPnl === null) {
+          pnlSource = "logged_price";
+          const now = new Date();
+          const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          const lastCheck = await prisma.intradayCheck.findFirst({
+            where: { date: { gte: startOfDay } },
+            orderBy: { date: "desc" },
+          });
+          const todayPrep = await prisma.preMarketPrep.findFirst({
+            where: { date: { gte: startOfDay } },
+            orderBy: { date: "desc" },
+          });
+          currentPrice = lastCheck?.nqPrice ?? todayPrep?.nqPrice ?? undefined;
+        }
 
-      if (directPnl !== null || currentPrice !== undefined) {
+        if (directPnl === null && currentPrice === undefined) {
+          // FAIL CLOSED: we cannot determine whether this position is
+          // winning or losing from any source (Tradovate position P&L,
+          // Tradovate account P&L, or your own logged price). Rather than
+          // silently letting an unverifiable "add to position" order
+          // through, block it and say exactly why.
+          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no data available from Tradovate's position P&L, account P&L, or your logged prices. Blocking this add as a precaution. Log an Intraday check to give this a number to check against.`;
+          await prisma.tradovateOrderLog.create({
+            data: {
+              env, symbol, side: action, qty: parseInt(orderQty), orderType,
+              limitPrice: price ? parseFloat(price) : null,
+              status: "BLOCKED",
+              blockedReason: reason,
+            },
+          });
+          return NextResponse.json({ blocked: true, reason }, { status: 403 });
+        }
+
         const guard = checkAddingToLoser({
           existingNetPos: position.netPos,
           existingNetPrice: position.netPrice,
@@ -137,11 +161,21 @@ export async function POST(req: NextRequest) {
       }
     }
   } catch (err: any) {
-    // If the position lookup itself fails (e.g. contract matching issue),
-    // we do NOT silently allow the order through unchecked — log it and let
-    // the order fall through to Tradovate's own validation, but surface the
-    // lookup failure so it's visible rather than hidden.
+    // The old comment here claimed this failed closed — it didn't; it just
+    // logged and let the order through. Fixed: if the position lookup
+    // itself errors out, we genuinely don't know if there's a losing
+    // position to protect, so block rather than guess.
     console.error("Position guard lookup failed:", err.message || err);
+    const reason = `Could not check your current position before this order (lookup error: ${err.message || err}). Blocking as a precaution rather than proceeding unverified.`;
+    await prisma.tradovateOrderLog.create({
+      data: {
+        env, symbol, side: action, qty: parseInt(orderQty), orderType,
+        limitPrice: price ? parseFloat(price) : null,
+        status: "BLOCKED",
+        blockedReason: reason,
+      },
+    });
+    return NextResponse.json({ blocked: true, reason }, { status: 403 });
   }
 
   // GUARD 3 — daily loss limit, computed from REAL Tradovate fills (not the
