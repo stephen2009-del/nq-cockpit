@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
       // availability — there's nothing to protect against there.
       if (newDirection === existingDirection) {
         let directPnl = extractPositionPnl(position);
-        let pnlSource: "position" | "account" | "logged_price" = "position";
+        let pnlSource: "position" | "account" | "order_price" | "logged_price" = "position";
 
         if (directPnl === null) {
           const cashResult = await getCashBalance(env, parseInt(accountId));
@@ -103,7 +103,20 @@ export async function POST(req: NextRequest) {
         }
 
         let currentPrice: number | undefined;
-        if (directPnl === null) {
+
+        // The order itself may already contain a real, current price — the
+        // Limit price you just typed in. That's more immediately relevant
+        // than a separately logged Intraday check, and it's already in
+        // hand with zero extra steps, so it's checked first.
+        if (directPnl === null && orderType === "Limit" && price) {
+          const submittedPrice = parseFloat(price);
+          if (Number.isFinite(submittedPrice)) {
+            currentPrice = submittedPrice;
+            pnlSource = "order_price";
+          }
+        }
+
+        if (directPnl === null && currentPrice === undefined) {
           pnlSource = "logged_price";
           const safePrice = await getLastKnownNqPrice();
           currentPrice = safePrice ?? undefined;
@@ -112,10 +125,10 @@ export async function POST(req: NextRequest) {
         if (directPnl === null && currentPrice === undefined) {
           // FAIL CLOSED: we cannot determine whether this position is
           // winning or losing from any source (Tradovate position P&L,
-          // Tradovate account P&L, or your own logged price). Rather than
-          // silently letting an unverifiable "add to position" order
-          // through, block it and say exactly why.
-          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no data available from Tradovate's position P&L, account P&L, or your logged prices. Blocking this add as a precaution. Log an Intraday check to give this a number to check against.`;
+          // Tradovate account P&L, the order's own price, or your logged
+          // price). Rather than silently letting an unverifiable "add to
+          // position" order through, block it and say exactly why.
+          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no data available from Tradovate's position P&L, account P&L, this order's price, or your logged prices. Blocking this add as a precaution.`;
           await prisma.tradovateOrderLog.create({
             data: {
               env, symbol, side: action, qty: parseInt(orderQty), orderType,

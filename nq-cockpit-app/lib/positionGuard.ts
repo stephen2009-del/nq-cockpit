@@ -10,7 +10,7 @@ export function checkAddingToLoser(params: {
   newOrderSide: "Buy" | "Sell";
   currentPrice?: number;
   directPnl?: number | null;
-  pnlSource?: "position" | "account" | "logged_price";
+  pnlSource?: "position" | "account" | "order_price" | "logged_price";
 }): PositionGuardResult {
   const { existingNetPos, existingNetPrice, newOrderSide, currentPrice, directPnl, pnlSource } = params;
 
@@ -34,7 +34,9 @@ export function checkAddingToLoser(params: {
     sourceLabel = pnlSource === "account" ? "Tradovate account-level P&L" : "Tradovate's own position P&L";
   } else if (currentPrice !== undefined) {
     unrealized = existingDirection === "long" ? currentPrice - existingNetPrice : existingNetPrice - currentPrice;
-    sourceLabel = `your last logged price (${currentPrice.toFixed(2)}) — not live Tradovate data`;
+    sourceLabel = pnlSource === "order_price"
+      ? `the price on this order (${currentPrice.toFixed(2)}) — not live Tradovate data`
+      : `your last logged price (${currentPrice.toFixed(2)}) — not live Tradovate data`;
   } else {
     // No data at all to judge this by — don't block on a guess.
     return { blocked: false, reason: null };

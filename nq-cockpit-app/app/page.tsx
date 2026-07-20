@@ -1426,7 +1426,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       <div className="panel-box">
         <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
         <div className="panel-desc">
-          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position (using Tradovate's own P&L data when available, falling back to your most recent logged price otherwise). The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
+          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position — checked using Tradovate's own P&L data when available, then this order's own Limit price, then your last logged Intraday/Pre-Market price. The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
           {settings.tradovateEnv === "live" && (
             <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
           )}
