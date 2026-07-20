@@ -5,6 +5,7 @@ import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
+import { getLastKnownNqPrice } from "@/lib/lastKnownPrice";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -104,17 +105,8 @@ export async function POST(req: NextRequest) {
         let currentPrice: number | undefined;
         if (directPnl === null) {
           pnlSource = "logged_price";
-          const now = new Date();
-          const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          const lastCheck = await prisma.intradayCheck.findFirst({
-            where: { date: { gte: startOfDay } },
-            orderBy: { date: "desc" },
-          });
-          const todayPrep = await prisma.preMarketPrep.findFirst({
-            where: { date: { gte: startOfDay } },
-            orderBy: { date: "desc" },
-          });
-          currentPrice = lastCheck?.nqPrice ?? todayPrep?.nqPrice ?? undefined;
+          const safePrice = await getLastKnownNqPrice();
+          currentPrice = safePrice ?? undefined;
         }
 
         if (directPnl === null && currentPrice === undefined) {

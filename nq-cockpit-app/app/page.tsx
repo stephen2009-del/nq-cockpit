@@ -1651,8 +1651,8 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                   <td>{p.symbol}</td>
                   <td><span className={`tag ${p.netPos > 0 ? "long" : "short"}`}>{p.netPos > 0 ? "LONG" : "SHORT"} {Math.abs(p.netPos)}</span></td>
                   <td>{p.netPrice?.toFixed(2)}</td>
-                  <td className={p.pnl !== null ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
-                    {p.pnl !== null ? fmtMoney(p.pnl) : "— (no data available)"}
+                  <td className={p.pnl !== null && Number.isFinite(p.pnl) ? (p.pnl >= 0 ? "pnl-pos" : "pnl-neg") : undefined}>
+                    {p.pnl !== null && Number.isFinite(p.pnl) ? fmtMoney(p.pnl) : "— (no data available)"}
                   </td>
                   <td className="card-sub" style={{ marginTop: 0 }}>
                     {p.pnlSource === "position" ? "Tradovate (position)" :

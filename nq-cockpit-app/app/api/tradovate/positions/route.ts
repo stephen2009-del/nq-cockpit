@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPositions, getContractName, extractPositionPnl, getCashBalance, extractAccountOpenPnl } from "@/lib/tradovate";
 import { prisma } from "@/lib/prisma";
+import { getLastKnownNqPrice } from "@/lib/lastKnownPrice";
 
 export async function GET(req: NextRequest) {
   const env = (req.nextUrl.searchParams.get("env") || "demo") as "demo" | "live";
@@ -18,11 +19,7 @@ export async function GET(req: NextRequest) {
   let settings = await prisma.settings.findUnique({ where: { id: 1 } });
   if (!settings) settings = await prisma.settings.create({ data: { id: 1 } });
 
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const lastCheck = await prisma.intradayCheck.findFirst({ where: { date: { gte: startOfDay } }, orderBy: { date: "desc" } });
-  const todayPrep = await prisma.preMarketPrep.findFirst({ where: { date: { gte: startOfDay } }, orderBy: { date: "desc" } });
-  const loggedPrice = lastCheck?.nqPrice ?? todayPrep?.nqPrice ?? null;
+  const loggedPrice = await getLastKnownNqPrice();
 
   const open = result.body.filter((p: any) => p.netPos && p.netPos !== 0);
   const enriched = await Promise.all(

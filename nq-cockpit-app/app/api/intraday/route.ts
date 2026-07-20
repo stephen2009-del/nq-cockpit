@@ -16,6 +16,11 @@ export async function POST(req: NextRequest) {
   const qqqPrice = parseFloat(body.qqqPrice);
   const multiplier = parseFloat(body.multiplier);
   const nqPrice = qqqPrice * multiplier;
+
+  if (!Number.isFinite(qqqPrice) || !Number.isFinite(multiplier) || !Number.isFinite(nqPrice)) {
+    return NextResponse.json({ error: "qqqPrice and multiplier must be valid numbers" }, { status: 400 });
+  }
+
   const check = await prisma.intradayCheck.create({
     data: { qqqPrice, nqPrice },
   });

@@ -17,6 +17,10 @@ export async function POST(req: NextRequest) {
   const openInterestNotes = body.openInterestNotes ?? null;
   const nqPrice = qqqPrice * multiplier;
 
+  if (!Number.isFinite(qqqPrice) || !Number.isFinite(multiplier) || !Number.isFinite(estimatedMove) || !Number.isFinite(nqPrice)) {
+    return NextResponse.json({ error: "qqqPrice, multiplier, and estimatedMove must be valid numbers" }, { status: 400 });
+  }
+
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const endOfDay = new Date(startOfDay);
