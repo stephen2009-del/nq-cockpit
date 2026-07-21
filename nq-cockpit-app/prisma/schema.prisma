@@ -27,10 +27,14 @@ model Trade {
   setup             String?
   emotion           String?
   notes             String?
-  disciplined       Boolean
+  disciplined       Boolean?
   checklistSnapshot Json
   plannedStop       Float?
   plannedTarget     Float?
+  source            String   @default("manual")
+  externalRef       String?  @unique
+  source            String   @default("manual")
+  syncKey           String?  @unique
 }
 
 model Settings {
