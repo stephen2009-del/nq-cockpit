@@ -2668,3 +2668,4 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
     </div>
   );
 }
+
