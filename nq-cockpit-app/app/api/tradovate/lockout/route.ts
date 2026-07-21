@@ -3,8 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
 import { etTimeTodayToUtc } from "@/lib/tradingWindow";
 
-export async function GET() {
-  const active = await getActiveLockout();
+export async function GET(req: NextRequest) {
+  const env = req.nextUrl.searchParams.get("env") || "demo";
+  const active = await getActiveLockout(env);
   return NextResponse.json({ active });
 }
 
@@ -13,7 +14,8 @@ export async function GET() {
 // "hard block, no override" approach used elsewhere in this app.
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const existing = await getActiveLockout();
+  const env = body.env || "demo";
+  const existing = await getActiveLockout(env);
   if (existing) {
     return NextResponse.json(
       { error: `Already locked until ${existing.until}. Cannot stack or override an active lockout.` },
@@ -38,6 +40,6 @@ export async function POST(req: NextRequest) {
     reason = `Manual lockout — ${minutes} minutes`;
   }
 
-  const lockout = await createLockout(until, reason);
+  const lockout = await createLockout(env, until, reason);
   return NextResponse.json({ lockout });
 }

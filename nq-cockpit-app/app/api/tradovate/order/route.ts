@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
   }
 
   // GUARD 0 — active manual/auto lockout. Checked before anything else.
-  const activeLockout = await getActiveLockout();
+  const activeLockout = await getActiveLockout(env);
   if (activeLockout) {
     await prisma.tradovateOrderLog.create({
       data: {
@@ -196,7 +196,7 @@ export async function POST(req: NextRequest) {
 
     if (todaysRealizedPnl <= -settings.dailyLossLimit) {
       const until = etTimeTodayToUtc(settings.tradingWindowEnd);
-      await createLockout(until, `Daily loss limit reached (${todaysRealizedPnl.toFixed(2)} vs limit -${settings.dailyLossLimit})`);
+      await createLockout(env, until, `Daily loss limit reached (${todaysRealizedPnl.toFixed(2)} vs limit -${settings.dailyLossLimit})`);
       const reason = `Daily loss limit reached: realized P&L ${todaysRealizedPnl.toFixed(2)} vs. your limit of -${settings.dailyLossLimit}. Trading locked for the rest of the day.`;
       await prisma.tradovateOrderLog.create({
         data: {

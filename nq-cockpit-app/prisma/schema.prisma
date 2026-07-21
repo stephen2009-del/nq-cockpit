@@ -91,6 +91,7 @@ model IntradayCheck {
 model TradeLockout {
   id        Int      @id @default(autoincrement())
   createdAt DateTime @default(now())
+  env       String   @default("demo")
   until     DateTime
   reason    String
 }

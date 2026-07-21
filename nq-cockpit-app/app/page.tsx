@@ -1300,7 +1300,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }
 
   function refreshLockout() {
-    fetch("/api/tradovate/lockout").then((r) => r.json()).then((d) => setLockout(d.active));
+    fetch(`/api/tradovate/lockout?env=${settings.tradovateEnv}`).then((r) => r.json()).then((d) => setLockout(d.active));
   }
 
   function refreshPositions() {
@@ -1320,7 +1320,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     const res = await fetch("/api/tradovate/lockout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(restOfDay ? { restOfDay: true } : { minutes }),
+      body: JSON.stringify(restOfDay ? { restOfDay: true, env: settings.tradovateEnv } : { minutes, env: settings.tradovateEnv }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1339,6 +1339,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   useEffect(() => {
     refreshPositions();
+    refreshLockout();
   }, [form.accountId, settings.tradovateEnv]);
 
   useEffect(() => {
