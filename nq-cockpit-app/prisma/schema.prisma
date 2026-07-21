@@ -119,3 +119,12 @@ model StopManagementRule {
   verified       Boolean?
   detail         String?
 }
+
+model SchwabToken {
+  id           Int      @id @default(1)
+  accessToken  String
+  refreshToken String
+  accessExpiresAt DateTime
+  refreshExpiresAt DateTime
+  updatedAt    DateTime @updatedAt
+}
