@@ -19,11 +19,10 @@ type Trade = {
   setup: string | null;
   emotion: string | null;
   notes: string | null;
-  disciplined: boolean | null;
+  disciplined: boolean;
   checklistSnapshot: { rule: string; passed: boolean }[];
   plannedStop: number | null;
   plannedTarget: number | null;
-  source: string;
 };
 type Settings = {
   id: number;
@@ -135,7 +134,7 @@ function groupBy(trades: Trade[], keyFn: (t: Trade) => string) {
 }
 
 function downloadTradesCSV(trades: Trade[]) {
-  const headers = ["Date", "Symbol", "Direction", "Session", "Entry", "Exit", "Size", "PnL", "Setup", "Emotion", "Disciplined", "Source", "Notes"];
+  const headers = ["Date", "Symbol", "Direction", "Session", "Entry", "Exit", "Size", "PnL", "Setup", "Emotion", "Disciplined", "Notes"];
   const rows = trades.map((t) => [
     new Date(t.date).toISOString(),
     t.symbol,
@@ -147,8 +146,7 @@ function downloadTradesCSV(trades: Trade[]) {
     t.pnl,
     t.setup ?? "",
     t.emotion ?? "",
-    t.disciplined === true ? "CLEAN" : t.disciplined === false ? "FLAGGED" : "UNCLASSIFIED",
-    t.source === "tradovate_sync" ? "Synced" : "Manual",
+    t.disciplined ? "CLEAN" : "FLAGGED",
     (t.notes ?? "").replace(/"/g, '""'),
   ]);
   const csv = [headers, ...rows]
@@ -456,7 +454,7 @@ export default function Page() {
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
 
       {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
-      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} />}
+      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} />}
       {tab === "emojournal" && <EmotionalJournalTab form={emoForm} setForm={setEmoForm} onSave={addEmoEntry} entries={emoEntries} />}
 
       {tab === "intraday" && (
@@ -594,12 +592,7 @@ export default function Page() {
                         <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
                         <td>{t.setup || "—"}</td>
                         <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
-                        <td>
-                          <span className={`tag ${t.disciplined === true ? "clean" : t.disciplined === false ? "flag" : ""}`} style={t.disciplined === null ? { background: "rgba(140,150,170,0.15)", color: "var(--muted)", border: "1px solid var(--line)" } : undefined}>
-                            {t.disciplined === true ? "CLEAN" : t.disciplined === false ? "FLAGGED" : "UNCLASSIFIED"}
-                          </span>
-                          {t.source === "tradovate_sync" && <div className="card-sub" style={{ marginTop: 2 }}>Synced from Tradovate</div>}
-                        </td>
+                        <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                         <td>{t.emotion}</td>
                         <td>
                           {flags.length === 0 ? "—" : flags.map((f, i) => (
@@ -1267,7 +1260,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
-  const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string; diagnostic?: any } | null>(null);
+  const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
@@ -1307,7 +1300,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }
 
   function refreshLockout() {
-    fetch(`/api/tradovate/lockout?env=${settings.tradovateEnv}`).then((r) => r.json()).then((d) => setLockout(d.active));
+    fetch("/api/tradovate/lockout").then((r) => r.json()).then((d) => setLockout(d.active));
   }
 
   function refreshPositions() {
@@ -1327,7 +1320,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     const res = await fetch("/api/tradovate/lockout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(restOfDay ? { restOfDay: true, env: settings.tradovateEnv } : { minutes, env: settings.tradovateEnv }),
+      body: JSON.stringify(restOfDay ? { restOfDay: true } : { minutes }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1346,7 +1339,6 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   useEffect(() => {
     refreshPositions();
-    refreshLockout();
   }, [form.accountId, settings.tradovateEnv]);
 
   useEffect(() => {
@@ -1487,11 +1479,6 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             : resolvedSymbol?.symbol
             ? `✓ Resolved to ${resolvedSymbol.symbol}${resolvedSymbol.expiration ? ` (expires ${new Date(resolvedSymbol.expiration).toLocaleDateString()})` : ""}`
             : `⚠ Could not resolve a contract for ${form.root}: ${resolvedSymbol?.error || "unknown error"}`}
-          {!resolving && !resolvedSymbol?.symbol && resolvedSymbol?.diagnostic && (
-            <pre style={{ marginTop: 8, fontSize: 11, whiteSpace: "pre-wrap", opacity: 0.85 }}>
-              {JSON.stringify(resolvedSymbol.diagnostic, null, 2)}
-            </pre>
-          )}
         </div>
 
         <div className="grid3">
@@ -1877,14 +1864,42 @@ function downloadAnalyticsPdf(
   doc.save(`nq-cockpit-tradovate-analytics-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
-function TVAnalyticsTab({ settings }: { settings: Settings }) {
+// Best-effort session label from the exit timestamp's local hour, since
+// Tradovate fills don't carry a session tag of their own — used only to
+// pre-fill the Journal entry, same buckets as the manual Trade Journal form.
+function sessionFromDate(iso: string): string {
+  const h = new Date(iso).getHours() + new Date(iso).getMinutes() / 60;
+  if (h >= 9.5 && h < 10.5) return "NY Open";
+  if (h >= 10.5 && h < 14) return "NY AM";
+  if (h >= 14 && h < 16) return "NY PM";
+  if (h >= 3 && h < 8) return "London";
+  if (h >= 20 || h < 3) return "Asia";
+  return "Overnight";
+}
+
+// A matched trade is treated as already synced if a journal entry exists
+// with the same symbol, side, entry/exit price, and a date within a minute
+// of the fill's exit time — avoids duplicate journal rows on repeat pulls.
+function findSyncedTrade(mt: MatchedTrade, trades: Trade[]): Trade | undefined {
+  const exitMs = new Date(mt.exitTime).getTime();
+  return trades.find((t) => {
+    if (t.symbol !== mt.symbol) return false;
+    if (t.dir !== mt.side) return false;
+    if (t.entry === null || t.exit === null) return false;
+    if (Math.abs(t.entry - mt.entryPrice) > 0.01) return false;
+    if (Math.abs(t.exit - mt.exitPrice) > 0.01) return false;
+    return Math.abs(new Date(t.date).getTime() - exitMs) < 60000;
+  });
+}
+
+function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Settings; trades: Trade[]; onTradeSynced: (t: Trade) => void }) {
   const [accountId, setAccountId] = useState("");
   const [accounts, setAccounts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<{ fills: any[]; positions: any[]; cashBalance: any } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncingJournal, setSyncingJournal] = useState(false);
-  const [journalSyncResult, setJournalSyncResult] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
@@ -1913,37 +1928,54 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
     setLoading(false);
   }
 
-  async function syncToJournal() {
-    if (!accountId) {
-      alert("Select an account first.");
-      return;
-    }
-    setSyncingJournal(true);
-    setJournalSyncResult(null);
-    try {
-      const res = await fetch("/api/trades/sync-tradovate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ env: settings.tradovateEnv, accountId }),
-      });
-      const d = await res.json();
-      if (d.error) {
-        setJournalSyncResult(`Error: ${d.error}`);
-      } else {
-        setJournalSyncResult(`Found ${d.totalMatchedTrades} closed trade(s). Imported ${d.newlyImported} new — ${d.alreadyPresent} already in Journal.`);
-      }
-    } catch (err: any) {
-      setJournalSyncResult(`Error: ${err.message || String(err)}`);
-    }
-    setSyncingJournal(false);
-  }
-
   const matchedTrades = data ? matchFillsToTrades(data.fills, settings.multiplier) : [];
   const totalPnl = matchedTrades.reduce((s, t) => s + t.pnl, 0);
   const wins = matchedTrades.filter((t) => t.pnl > 0).length;
   const winRate = matchedTrades.length ? Math.round((wins / matchedTrades.length) * 100) : 0;
   const accountLabel = `${settings.tradovateEnv.toUpperCase()} account ${accounts.find((a) => String(a.id) === accountId)?.name || accountId}`;
   const holdAnalysis = analyzeHoldTimes(matchedTrades);
+  const unsyncedTrades = matchedTrades.filter((t) => !findSyncedTrade(t, trades));
+
+  async function syncTradeToJournal(t: MatchedTrade) {
+    const trade = await fetch("/api/trades", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: t.symbol,
+        dir: t.side,
+        session: sessionFromDate(t.exitTime),
+        entry: String(t.entryPrice),
+        exit: String(t.exitPrice),
+        size: String(t.qty),
+        pnl: t.pnl,
+        setup: null,
+        emotion: null,
+        notes: "Synced from Tradovate \u2014 auto-imported from real fills, not self-reported.",
+        disciplined: true,
+        checklistSnapshot: [],
+        plannedStop: null,
+        plannedTarget: null,
+        date: t.exitTime,
+      }),
+    }).then((r) => r.json());
+    onTradeSynced(trade);
+  }
+
+  async function syncAllToJournal() {
+    if (unsyncedTrades.length === 0) return;
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      for (const t of unsyncedTrades) {
+        await syncTradeToJournal(t);
+      }
+      setSyncMsg(`\u2713 Synced ${unsyncedTrades.length} trade${unsyncedTrades.length === 1 ? "" : "s"} to the Journal.`);
+    } catch (err: any) {
+      setSyncMsg(`\u26a0 Sync failed: ${err.message || String(err)}`);
+    }
+    setSyncing(false);
+    setTimeout(() => setSyncMsg(null), 4000);
+  }
 
   const chart = matchedTrades.length > 1 ? equityCurvePoints(matchedTrades, 900, 180, 10) : null;
 
@@ -1965,21 +1997,6 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
             </button>
           </div>
         </div>
-        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-          <div className="card-label" style={{ marginBottom: 6 }}>SYNC TO JOURNAL</div>
-          <div className="panel-desc" style={{ marginTop: 0, marginBottom: 10 }}>
-            Unlike Pull Analytics above, this writes to your database — it imports real closed trades into
-            Journal, Reports, and Dashboard as <b>Unclassified</b> (they never went through your Pre-Trade
-            checklist, so they're never guessed as clean or flagged). Safe to run repeatedly — already-imported
-            trades are never duplicated.
-          </div>
-          <button className="btn small ghost" onClick={syncToJournal} disabled={syncingJournal}>
-            {syncingJournal ? "Syncing…" : "Sync Closed Trades to Journal"}
-          </button>
-          {journalSyncResult && (
-            <div className="card-sub" style={{ marginTop: 8 }}>{journalSyncResult}</div>
-          )}
-        </div>
         {error && <div className="status-banner status-warn" style={{ marginTop: 12 }}>⚠ {JSON.stringify(error)}</div>}
       </div>
 
@@ -1988,7 +2005,16 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
           <div className="panel-box">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
               <div className="panel-title" style={{ margin: 0 }}>Account Summary</div>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {syncMsg && <span style={{ fontSize: 12 }}>{syncMsg}</span>}
+                <button
+                  className="btn small primary"
+                  onClick={syncAllToJournal}
+                  disabled={syncing || matchedTrades.length === 0 || unsyncedTrades.length === 0}
+                  title={matchedTrades.length === 0 ? "No closed trades to sync yet" : unsyncedTrades.length === 0 ? "All closed trades are already in the Journal" : undefined}
+                >
+                  {syncing ? "Syncing…" : unsyncedTrades.length === 0 && matchedTrades.length > 0 ? "All Synced" : `Sync to Journal${unsyncedTrades.length ? ` (${unsyncedTrades.length})` : ""}`}
+                </button>
                 <button className="btn small ghost" onClick={() => downloadHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate), `nq-cockpit-analytics-${new Date().toISOString().slice(0, 10)}.html`)}>Download HTML</button>
                 <button className="btn small ghost" onClick={() => downloadAnalyticsPdf(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate)}>Download PDF</button>
               </div>
@@ -2067,19 +2093,29 @@ function TVAnalyticsTab({ settings }: { settings: Settings }) {
             ) : (
               <div style={{ overflowX: "auto" }}>
                 <table>
-                  <thead><tr><th>Exit</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
+                  <thead><tr><th>Exit</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Journal</th></tr></thead>
                   <tbody>
-                    {[...matchedTrades].reverse().map((t, i) => (
-                      <tr key={i}>
-                        <td>{new Date(t.exitTime).toLocaleString()}</td>
-                        <td>{t.symbol}</td>
-                        <td><span className={`tag ${t.side === "long" ? "long" : "short"}`}>{t.side.toUpperCase()}</span></td>
-                        <td>{t.qty}</td>
-                        <td>{t.entryPrice.toFixed(2)}</td>
-                        <td>{t.exitPrice.toFixed(2)}</td>
-                        <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
-                      </tr>
-                    ))}
+                    {[...matchedTrades].reverse().map((t, i) => {
+                      const synced = findSyncedTrade(t, trades);
+                      return (
+                        <tr key={i}>
+                          <td>{new Date(t.exitTime).toLocaleString()}</td>
+                          <td>{t.symbol}</td>
+                          <td><span className={`tag ${t.side === "long" ? "long" : "short"}`}>{t.side.toUpperCase()}</span></td>
+                          <td>{t.qty}</td>
+                          <td>{t.entryPrice.toFixed(2)}</td>
+                          <td>{t.exitPrice.toFixed(2)}</td>
+                          <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
+                          <td>
+                            {synced ? (
+                              <span style={{ fontSize: 12, opacity: 0.7 }}>✓ Synced</span>
+                            ) : (
+                              <button className="btn small ghost" onClick={() => syncTradeToJournal(t)} disabled={syncing}>Sync</button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -2127,9 +2163,8 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   const avgWin = wins ? trades.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
   const avgLoss = losses ? Math.abs(trades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0) / losses) : 0;
   const expectancy = (winRate / 100) * avgWin - (1 - winRate / 100) * avgLoss;
-  const clean = trades.filter((t) => t.disciplined === true);
-  const flagged = trades.filter((t) => t.disciplined === false);
-  const unclassified = trades.filter((t) => t.disciplined === null);
+  const clean = trades.filter((t) => t.disciplined);
+  const flagged = trades.filter((t) => !t.disciplined);
   const cleanAvg = clean.length ? clean.reduce((s, t) => s + t.pnl, 0) / clean.length : 0;
   const flagAvg = flagged.length ? flagged.reduce((s, t) => s + t.pnl, 0) / flagged.length : 0;
   const cleanWinRate = clean.length ? Math.round((clean.filter((t) => t.pnl > 0).length / clean.length) * 100) : 0;
@@ -2174,9 +2209,6 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
           <div className="stat-box"><div className="stat-num">{trades.length}</div><div className="stat-lbl">Total Trades</div></div>
           <div className="stat-box"><div className="stat-num">{clean.length}</div><div className="stat-lbl">Clean Trades</div></div>
           <div className="stat-box"><div className="stat-num" style={{ color: "var(--amber)" }}>{flagged.length}</div><div className="stat-lbl">Flagged Trades</div></div>
-          {unclassified.length > 0 && (
-            <div className="stat-box"><div className="stat-num" style={{ color: "var(--muted)" }}>{unclassified.length}</div><div className="stat-lbl">Unclassified (Synced)</div></div>
-          )}
         </div>
       </div>
 
@@ -2527,17 +2559,14 @@ function groupTradesByDay(trades: Trade[]) {
     .map(([dateStr, dayTrades]) => {
       const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
       const wins = dayTrades.filter((t) => t.pnl > 0).length;
-      const clean = dayTrades.filter((t) => t.disciplined === true).length;
-      const flagged = dayTrades.filter((t) => t.disciplined === false).length;
-      const unclassified = dayTrades.filter((t) => t.disciplined === null).length;
+      const clean = dayTrades.filter((t) => t.disciplined).length;
       return {
         dateStr,
         trades: dayTrades,
         pnl,
         winRate: Math.round((wins / dayTrades.length) * 100),
         clean,
-        flagged,
-        unclassified,
+        flagged: dayTrades.length - clean,
       };
     })
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
@@ -2559,7 +2588,7 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
   doc.text(`P&L: ${fmtMoney(day.pnl)}`, 14, y);
   doc.text(`Trades: ${day.trades.length}`, 70, y);
   doc.text(`Win rate: ${day.winRate}%`, 120, y);
-  doc.text(`Clean/Flagged/Unclassified: ${day.clean}/${day.flagged}/${day.unclassified}`, 160, y);
+  doc.text(`Clean/Flagged: ${day.clean}/${day.flagged}`, 160, y);
   y += 10;
 
   doc.setFont("courier", "bold");
@@ -2582,7 +2611,7 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
     doc.text(t.dir.toUpperCase(), 45, y);
     doc.text((t.setup || "-").slice(0, 20), 65, y);
     doc.text(fmtMoney(t.pnl), 110, y);
-    doc.text(t.disciplined === true ? "CLEAN" : t.disciplined === false ? "FLAGGED" : "UNCLASSIFIED", 140, y);
+    doc.text(t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
     doc.text((t.emotion || "-").slice(0, 18), 170, y);
     y += 6;
   });
@@ -2611,7 +2640,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
             <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
               <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
-              <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unclassified > 0 ? ` / ${day.unclassified} unclassified` : ""}</span>
+              <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged</span>
             </div>
             <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
           </div>
@@ -2626,7 +2655,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
                       <td>{t.setup || "—"}</td>
                       <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
-                      <td><span className={`tag ${t.disciplined === true ? "clean" : t.disciplined === false ? "flag" : ""}`} style={t.disciplined === null ? { background: "rgba(140,150,170,0.15)", color: "var(--muted)", border: "1px solid var(--line)" } : undefined}>{t.disciplined === true ? "CLEAN" : t.disciplined === false ? "FLAGGED" : "UNCLASSIFIED"}</span></td>
+                      <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                       <td>{t.emotion}</td>
                     </tr>
                   ))}

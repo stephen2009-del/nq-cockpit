@@ -1,13 +1,13 @@
 import { prisma } from "@/lib/prisma";
 
-export async function getActiveLockout(env: string) {
+export async function getActiveLockout() {
   const now = new Date();
   return prisma.tradeLockout.findFirst({
-    where: { until: { gt: now }, env },
+    where: { until: { gt: now } },
     orderBy: { until: "desc" },
   });
 }
 
-export async function createLockout(env: string, until: Date, reason: string) {
-  return prisma.tradeLockout.create({ data: { env, until, reason } });
+export async function createLockout(until: Date, reason: string) {
+  return prisma.tradeLockout.create({ data: { until, reason } });
 }

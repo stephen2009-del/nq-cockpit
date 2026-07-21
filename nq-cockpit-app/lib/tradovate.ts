@@ -233,11 +233,10 @@ export async function findFrontMonthContract(env: Env, root: string) {
   const suggest = await tradovateFetch(env, `/contract/suggest?t=${encodeURIComponent(root)}&l=20`);
   let candidates: any[] = suggest.ok && Array.isArray(suggest.body) ? suggest.body : [];
 
-  let listResult: { ok: boolean; status: number; body: any } | null = null;
   if (candidates.length === 0) {
-    listResult = await tradovateFetch(env, "/contract/list");
-    if (listResult.ok && Array.isArray(listResult.body)) {
-      candidates = listResult.body.filter((c: any) =>
+    const list = await tradovateFetch(env, "/contract/list");
+    if (list.ok && Array.isArray(list.body)) {
+      candidates = list.body.filter((c: any) =>
         typeof c.name === "string" && c.name.toUpperCase().startsWith(root.toUpperCase())
       );
     }
@@ -253,20 +252,7 @@ export async function findFrontMonthContract(env: Env, root: string) {
   });
 
   if (candidates.length === 0) {
-    return {
-      ok: false,
-      symbol: null,
-      candidates: [],
-      error: `No contracts found matching root "${root}"`,
-      diagnostic: {
-        suggestStatus: suggest.status,
-        suggestOk: suggest.ok,
-        suggestBody: suggest.ok ? `(${Array.isArray(suggest.body) ? suggest.body.length : "non-array"} items)` : suggest.body,
-        listStatus: listResult?.status ?? "not called (suggest returned candidates)",
-        listOk: listResult?.ok ?? null,
-        listBody: listResult && !listResult.ok ? listResult.body : undefined,
-      },
-    };
+    return { ok: false, symbol: null, candidates: [], error: `No contracts found matching root "${root}"` };
   }
 
   const withExpiry = await Promise.all(

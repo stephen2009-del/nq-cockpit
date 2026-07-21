@@ -10,6 +10,9 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const trade = await prisma.trade.create({
     data: {
+      // Allows callers (e.g. Tradovate sync) to backdate the entry to the
+      // real fill time instead of defaulting to "now".
+      ...(body.date ? { date: new Date(body.date) } : {}),
       symbol: body.symbol,
       dir: body.dir,
       session: body.session,
