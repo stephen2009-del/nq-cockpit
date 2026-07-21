@@ -82,6 +82,7 @@ tr:hover td{background:rgba(255,255,255,0.02);}
 .tag.short{background:rgba(229,72,77,0.15);color:var(--red);}
 .tag.clean{background:rgba(63,208,201,0.15);color:var(--cyan);}
 .tag.flag{background:rgba(245,166,35,0.15);color:var(--amber);}
+.tag.na{background:rgba(127,140,166,0.15);color:var(--muted);}
 .pnl-pos{color:var(--cyan);} .pnl-neg{color:var(--red);}
 .empty-state{text-align:center;padding:40px 20px;color:var(--muted);font-size:13px;}
 .empty-state .big{font-size:32px;margin-bottom:8px;}

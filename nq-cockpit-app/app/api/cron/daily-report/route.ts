@@ -26,8 +26,9 @@ export async function GET(req: NextRequest) {
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
   const wins = trades.filter((t) => t.pnl > 0).length;
   const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0;
-  const clean = trades.filter((t) => t.disciplined).length;
-  const flagged = trades.length - clean;
+  const clean = trades.filter((t) => t.disciplined === true).length;
+  const flagged = trades.filter((t) => t.disciplined === false).length;
+  const unrated = trades.length - clean - flagged;
 
   const rows = trades
     .map(
@@ -37,7 +38,7 @@ export async function GET(req: NextRequest) {
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.dir.toUpperCase()}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.setup || "-"}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${t.pnl >= 0 ? "$" : "-$"}${Math.abs(t.pnl).toFixed(2)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.disciplined ? "CLEAN" : "FLAGGED"}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</td>
     </tr>`
     )
     .join("");
@@ -50,7 +51,7 @@ export async function GET(req: NextRequest) {
         <div><strong>P&amp;L:</strong> ${totalPnl >= 0 ? "$" : "-$"}${Math.abs(totalPnl).toFixed(2)}</div>
         <div><strong>Trades:</strong> ${trades.length}</div>
         <div><strong>Win rate:</strong> ${winRate}%</div>
-        <div><strong>Clean/Flagged:</strong> ${clean}/${flagged}</div>
+        <div><strong>Clean/Flagged${unrated ? "/Unrated" : ""}:</strong> ${clean}/${flagged}${unrated ? "/" + unrated : ""}</div>
       </div>
       ${
         trades.length

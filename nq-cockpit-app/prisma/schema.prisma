@@ -27,7 +27,7 @@ model Trade {
   setup             String?
   emotion           String?
   notes             String?
-  disciplined       Boolean
+  disciplined       Boolean?
   checklistSnapshot Json
   plannedStop       Float?
   plannedTarget     Float?

@@ -19,7 +19,7 @@ type Trade = {
   setup: string | null;
   emotion: string | null;
   notes: string | null;
-  disciplined: boolean;
+  disciplined: boolean | null; // null = no self-reported checklist (e.g. broker-synced trades)
   checklistSnapshot: { rule: string; passed: boolean }[];
   plannedStop: number | null;
   plannedTarget: number | null;
@@ -146,7 +146,7 @@ function downloadTradesCSV(trades: Trade[]) {
     t.pnl,
     t.setup ?? "",
     t.emotion ?? "",
-    t.disciplined ? "CLEAN" : "FLAGGED",
+    t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED",
     (t.notes ?? "").replace(/"/g, '""'),
   ]);
   const csv = [headers, ...rows]
@@ -246,12 +246,14 @@ export default function Page() {
   }
 
   // ---- derived stats ----
-  const disciplineScore = trades.length ? Math.round((trades.filter((t) => t.disciplined).length / trades.length) * 100) : null;
+  const ratedTrades = trades.filter((t) => t.disciplined !== null);
+  const disciplineScore = ratedTrades.length ? Math.round((ratedTrades.filter((t) => t.disciplined).length / ratedTrades.length) * 100) : null;
   const today = new Date().toDateString();
   const todaysTrades = trades.filter((t) => new Date(t.date).toDateString() === today);
   const todaysPnl = todaysTrades.reduce((s, t) => s + t.pnl, 0);
   let streak = 0;
   for (let i = trades.length - 1; i >= 0; i--) {
+    if (trades[i].disciplined === null) continue; // unrated (synced) trades don't affect the streak
     if (trades[i].disciplined) streak++;
     else break;
   }
@@ -592,7 +594,7 @@ export default function Page() {
                         <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
                         <td>{t.setup || "—"}</td>
                         <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
-                        <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
+                        <td><span className={`tag ${t.disciplined === null ? "na" : t.disciplined ? "clean" : "flag"}`}>{t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                         <td>{t.emotion}</td>
                         <td>
                           {flags.length === 0 ? "—" : flags.map((f, i) => (
@@ -1966,7 +1968,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
         setup: null,
         emotion: null,
         notes: "Synced from Tradovate \u2014 auto-imported from real fills, not self-reported.",
-        disciplined: true,
+        disciplined: null, // no checklist exists for a broker fill; leave unrated rather than assuming clean
         checklistSnapshot: [],
         plannedStop: null,
         plannedTarget: null,
@@ -2179,8 +2181,8 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   const avgWin = wins ? trades.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
   const avgLoss = losses ? Math.abs(trades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0) / losses) : 0;
   const expectancy = (winRate / 100) * avgWin - (1 - winRate / 100) * avgLoss;
-  const clean = trades.filter((t) => t.disciplined);
-  const flagged = trades.filter((t) => !t.disciplined);
+  const clean = trades.filter((t) => t.disciplined === true);
+  const flagged = trades.filter((t) => t.disciplined === false);
   const cleanAvg = clean.length ? clean.reduce((s, t) => s + t.pnl, 0) / clean.length : 0;
   const flagAvg = flagged.length ? flagged.reduce((s, t) => s + t.pnl, 0) / flagged.length : 0;
   const cleanWinRate = clean.length ? Math.round((clean.filter((t) => t.pnl > 0).length / clean.length) * 100) : 0;
@@ -2575,14 +2577,17 @@ function groupTradesByDay(trades: Trade[]) {
     .map(([dateStr, dayTrades]) => {
       const pnl = dayTrades.reduce((s, t) => s + t.pnl, 0);
       const wins = dayTrades.filter((t) => t.pnl > 0).length;
-      const clean = dayTrades.filter((t) => t.disciplined).length;
+      const clean = dayTrades.filter((t) => t.disciplined === true).length;
+      const flagged = dayTrades.filter((t) => t.disciplined === false).length;
+      const unrated = dayTrades.filter((t) => t.disciplined === null).length;
       return {
         dateStr,
         trades: dayTrades,
         pnl,
         winRate: Math.round((wins / dayTrades.length) * 100),
         clean,
-        flagged: dayTrades.length - clean,
+        flagged,
+        unrated,
       };
     })
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
@@ -2604,7 +2609,7 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
   doc.text(`P&L: ${fmtMoney(day.pnl)}`, 14, y);
   doc.text(`Trades: ${day.trades.length}`, 70, y);
   doc.text(`Win rate: ${day.winRate}%`, 120, y);
-  doc.text(`Clean/Flagged: ${day.clean}/${day.flagged}`, 160, y);
+  doc.text(`Clean/Flagged${day.unrated ? "/Unrated" : ""}: ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}`, 160, y);
   y += 10;
 
   doc.setFont("courier", "bold");
@@ -2627,7 +2632,7 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
     doc.text(t.dir.toUpperCase(), 45, y);
     doc.text((t.setup || "-").slice(0, 20), 65, y);
     doc.text(fmtMoney(t.pnl), 110, y);
-    doc.text(t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
+    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
     doc.text((t.emotion || "-").slice(0, 18), 170, y);
     y += 6;
   });
@@ -2656,7 +2661,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
             <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
               <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
-              <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged</span>
+              <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
             </div>
             <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
           </div>
@@ -2671,7 +2676,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
                       <td>{t.setup || "—"}</td>
                       <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
-                      <td><span className={`tag ${t.disciplined ? "clean" : "flag"}`}>{t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
+                      <td><span className={`tag ${t.disciplined === null ? "na" : t.disciplined ? "clean" : "flag"}`}>{t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                       <td>{t.emotion}</td>
                     </tr>
                   ))}
