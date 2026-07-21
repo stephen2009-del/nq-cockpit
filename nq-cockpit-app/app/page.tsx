@@ -1008,7 +1008,7 @@ function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayP
   );
 }
 
-function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
+function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
   const w = 900, h = 220, pad = 30;
   const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
   const svg = `
@@ -1040,7 +1040,11 @@ ${svg}
 <p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Built from manually logged Intraday checks — not a live market data feed.</p>
 </body></html>`;
 
-  downloadHtmlReport(html, `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
+  return html;
+}
+
+function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
+  downloadHtmlReport(buildIntradayHtmlReport(checks, todayPrep), `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
 }
 
 const EMO_TAGS = ["Calm", "Confident", "Anxious", "FOMO", "Doubt", "Overconfident", "Tilted / Revenge", "Fear of losing gains", "Impatient", "Bored"];
@@ -1181,6 +1185,7 @@ function IntradayTab({
       <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div className="panel-title" style={{ margin: 0 }}>Today's Chart</div>
+          <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep))} disabled={checks.length === 0}>View HTML</button>
           <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
         </div>
         <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Built from your manual checks — not a live feed.</div>
@@ -1789,6 +1794,16 @@ function downloadHtmlReport(html: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+// Opens the report in a new tab instead of forcing a download — the object
+// URL is revoked after a delay rather than immediately, since the new tab
+// needs time to actually load the blob before it disappears.
+function viewHtmlReport(html: string) {
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 function downloadAnalyticsPdf(
   accountLabel: string,
   cashBalance: any,
@@ -2015,6 +2030,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
                 >
                   {syncing ? "Syncing…" : unsyncedTrades.length === 0 && matchedTrades.length > 0 ? "All Synced" : `Sync to Journal${unsyncedTrades.length ? ` (${unsyncedTrades.length})` : ""}`}
                 </button>
+                <button className="btn small ghost" onClick={() => viewHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate))}>View HTML</button>
                 <button className="btn small ghost" onClick={() => downloadHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate), `nq-cockpit-analytics-${new Date().toISOString().slice(0, 10)}.html`)}>Download HTML</button>
                 <button className="btn small ghost" onClick={() => downloadAnalyticsPdf(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate)}>Download PDF</button>
               </div>
@@ -2668,4 +2684,3 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
     </div>
   );
 }
-
