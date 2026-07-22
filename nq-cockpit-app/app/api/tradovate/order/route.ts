@@ -123,19 +123,38 @@ export async function POST(req: NextRequest) {
         }
 
         if (directPnl === null && currentPrice === undefined) {
-          // FAIL CLOSED: no Tradovate P&L, and no Intraday check logged
-          // within the freshness window. Block rather than guess.
-          const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no Tradovate P&L available, and no Intraday check logged within the last ${FRESHNESS_MINUTES} minutes. Log a fresh Intraday check and try again.`;
+          if (env === "live") {
+            // FAIL CLOSED (live only): no Tradovate P&L, and no Intraday
+            // check logged within the freshness window. Block rather than
+            // guess — this matters because real money is on the line.
+            const reason = `Cannot verify whether your existing ${existingDirection} position is winning or losing — no Tradovate P&L available, and no Intraday check logged within the last ${FRESHNESS_MINUTES} minutes. Log a fresh Intraday check and try again.`;
+            await prisma.tradovateOrderLog.create({
+              data: {
+                env, symbol, side: action, qty: parseInt(orderQty), orderType,
+                limitPrice: price ? parseFloat(price) : null,
+                status: "BLOCKED",
+                blockedReason: reason,
+              },
+            });
+            return NextResponse.json({ blocked: true, reason }, { status: 403 });
+          }
+          // DEMO: fail OPEN instead. This fallback price is QQQ-derived and
+          // only exists during equity market hours (9:30am-4pm ET) — but NQ
+          // itself trades nearly 24/5 on Globex, so blocking demo orders
+          // whenever it's after equity hours (or Tradovate's own P&L fields
+          // don't resolve) has no real protective value on a practice
+          // account and just gets in the way of testing overnight/Globex
+          // trades. The order log still records that this check was
+          // skipped, for visibility.
           await prisma.tradovateOrderLog.create({
             data: {
               env, symbol, side: action, qty: parseInt(orderQty), orderType,
               limitPrice: price ? parseFloat(price) : null,
-              status: "BLOCKED",
-              blockedReason: reason,
+              status: "ALLOWED",
+              blockedReason: "Demo: position-guard check skipped (no Tradovate P&L or fresh Intraday price available) \u2014 not enforced on demo.",
             },
           });
-          return NextResponse.json({ blocked: true, reason }, { status: 403 });
-        }
+        } else {
 
         const guard = checkAddingToLoser({
           existingNetPos: position.netPos,
@@ -160,6 +179,7 @@ export async function POST(req: NextRequest) {
             },
           });
           return NextResponse.json({ blocked: true, reason: guard.reason }, { status: 403 });
+        }
         }
       }
     }

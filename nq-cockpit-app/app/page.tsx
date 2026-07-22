@@ -1262,6 +1262,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     return raw;
   }
   const [windowStatus, setWindowStatus] = useState(computeWindowStatus);
+
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
   const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
@@ -1270,6 +1271,21 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
   const [resolving, setResolving] = useState(false);
   const [lastKnownPrice, setLastKnownPrice] = useState<number | null>(null);
+  const [lastKnownPriceAt, setLastKnownPriceAt] = useState<string | null>(null);
+
+  // Matches lib/lastKnownPrice.ts's FRESHNESS_MINUTES (kept as a separate
+  // constant here since that module also imports prisma, which shouldn't be
+  // bundled into a client component). Anything older than this is NOT
+  // reliable enough to silently hand you as if it's roughly current — QQQ
+  // (the source of this number) doesn't trade outside 9:30am–4pm ET, so a
+  // check logged before close can be many hours stale by the time you're
+  // placing an overnight/Globex order.
+  const LAST_KNOWN_PRICE_STALE_MINUTES = 10;
+  const lastKnownPriceAgeMinutes = lastKnownPriceAt ? Math.round((Date.now() - new Date(lastKnownPriceAt).getTime()) / 60000) : null;
+  const lastKnownPriceIsFresh = lastKnownPriceAgeMinutes !== null && lastKnownPriceAgeMinutes <= LAST_KNOWN_PRICE_STALE_MINUTES;
+  const lastKnownPriceAgeLabel = lastKnownPriceAgeMinutes === null ? "" : lastKnownPriceAgeMinutes < 60
+    ? `${lastKnownPriceAgeMinutes} min ago`
+    : `${Math.floor(lastKnownPriceAgeMinutes / 60)}h ${lastKnownPriceAgeMinutes % 60}m ago`;
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
   const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null; openSinceMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
@@ -1371,6 +1387,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       const latestCheck = checks[checks.length - 1];
       const todayPrep = prep.find((p: PreMarketPrep) => new Date(p.date).toDateString() === new Date().toDateString());
       setLastKnownPrice(latestCheck?.nqPrice ?? todayPrep?.nqPrice ?? null);
+      setLastKnownPriceAt(latestCheck?.date ?? todayPrep?.date ?? null);
     });
   }, [settings.tradovateEnv]);
 
@@ -1386,7 +1403,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }, [form.root, settings.tradovateEnv]);
 
   function useLimitOrder() {
-    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price }));
+    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price }));
   }
 
   async function submitOrder() {
@@ -1500,7 +1517,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                 setForm((f) => ({
                   ...f,
                   orderType: newType,
-                  price: newType === "Limit" && !f.price && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price,
+                  price: newType === "Limit" && !f.price && lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price,
                 }));
               }}
             >
@@ -1519,19 +1536,26 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                 }}
               />
               <div className="card-sub" style={{ marginTop: 4 }}>
-                {!form.price && lastKnownPrice !== null
-                  ? `Not filled in yet. Your last logged price was ${roundToTick(lastKnownPrice).toFixed(2)} — not a live quote. Enter a price or clear/reselect Order Type to prefill it.`
+                {!form.price && lastKnownPrice !== null && lastKnownPriceIsFresh
+                  ? `Not filled in yet. Your last logged price was ${roundToTick(lastKnownPrice).toFixed(2)} (${lastKnownPriceAgeLabel}) \u2014 still not a live quote. Enter a price or clear/reselect Order Type to prefill it.`
+                  : !form.price && lastKnownPrice !== null && !lastKnownPriceIsFresh
+                  ? `\u26a0 No recent price available. The last logged price (${roundToTick(lastKnownPrice).toFixed(2)}) is ${lastKnownPriceAgeLabel} old \u2014 QQQ doesn't trade outside 9:30am\u20134pm ET, so this is NOT a reasonable stand-in for the current NQ price. Check your own live chart and enter the current price manually.`
                   : !form.price
-                  ? "No recent price logged in Pre-Market/Intraday — enter manually."
-                  : "Not a live quote — double check this price before submitting."}
+                  ? "No recent price logged in Pre-Market/Intraday \u2014 enter manually from your own live chart."
+                  : "Not a live quote \u2014 double check this price before submitting."}
               </div>
             </div>
           )}
         </div>
-        {form.orderType === "Market" && lastKnownPrice !== null && (
+        {form.orderType === "Market" && lastKnownPrice !== null && lastKnownPriceIsFresh && (
           <button className="btn small ghost" onClick={useLimitOrder} style={{ marginBottom: 12 }}>
             Switch to Limit @ last known price ({roundToTick(lastKnownPrice).toFixed(2)})
           </button>
+        )}
+        {form.orderType === "Market" && lastKnownPrice !== null && !lastKnownPriceIsFresh && (
+          <div className="card-sub" style={{ marginBottom: 12, color: "var(--amber)" }}>
+            ⚠ No fresh price to offer here — last logged price is {lastKnownPriceAgeLabel} old (QQQ-derived, doesn't update outside 9:30am–4pm ET). Check your own live chart if you want to switch to a Limit order.
+          </div>
         )}
 
         <div style={{ marginTop: 8, marginBottom: 4 }}>
@@ -1712,7 +1736,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                     <td>{l.qty}</td>
                     <td>{l.orderType}{l.limitPrice ? ` @ ${l.limitPrice}` : ""}</td>
                     <td>{l.stopLossPrice && l.targetPrice ? `${l.stopLossPrice} / ${l.targetPrice}` : "—"}</td>
-                    <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : "flag"}`}>{l.status}</span></td>
+                    <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : l.status === "ALLOWED" ? "na" : "flag"}`}>{l.status}</span></td>
                     <td style={{ maxWidth: 260, whiteSpace: "normal" }}>{l.blockedReason || l.tradovateOrderId || "—"}</td>
                   </tr>
                 ))}
@@ -1735,6 +1759,54 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
   const coords = points.map((p, i) => `${pad + i * stepX},${h - pad - ((p - min) / range) * (h - 2 * pad)}`).join(" ");
   const zeroY = h - pad - ((0 - min) / range) * (h - 2 * pad);
   return { coords, zeroY, points };
+}
+
+// Builds a standalone inline SVG equity curve for the exported HTML report
+// (can't reuse the React IntradayChart component here since this string gets
+// dropped into a plain downloaded/viewed .html file with no React runtime).
+function buildEquityCurveSvg(matchedTrades: MatchedTrade[]): string {
+  const w = 760, h = 240, pad = 36;
+  if (matchedTrades.length === 0) {
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><text x="${w / 2}" y="${h / 2}" fill="#7F8CA6" font-size="13" text-anchor="middle" font-family="Courier New, monospace">No closed trades yet.</text></svg>`;
+  }
+  const { coords, zeroY, points } = equityCurvePoints(matchedTrades, w, h, pad);
+  const last = points[points.length - 1];
+  const lineColor = last >= 0 ? "#3FD0C9" : "#E5484D";
+  const dots = points
+    .map((p, i) => {
+      const stepX = points.length > 1 ? (w - 2 * pad) / (points.length - 1) : 0;
+      const min = Math.min(0, ...points, 0);
+      const max = Math.max(0, ...points, 0);
+      const range = max - min || 1;
+      const x = pad + i * stepX;
+      const y = h - pad - ((p - min) / range) * (h - 2 * pad);
+      return `<circle cx="${x}" cy="${y}" r="3" fill="${p >= 0 ? "#3FD0C9" : "#E5484D"}" />`;
+    })
+    .join("");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+    <line x1="${pad}" y1="${zeroY}" x2="${w - pad}" y2="${zeroY}" stroke="#263654" stroke-width="1" stroke-dasharray="4,4" />
+    <polyline points="${coords}" fill="none" stroke="${lineColor}" stroke-width="2" />
+    ${dots}
+  </svg>`;
+}
+
+// Simple horizontal win/loss bar — wins vs. losses by count, not $, so a
+// handful of big losers doesn't visually dominate a mostly-winning session.
+function buildWinLossBarSvg(matchedTrades: MatchedTrade[]): string {
+  const w = 760, h = 46;
+  const wins = matchedTrades.filter((t) => t.pnl > 0).length;
+  const losses = matchedTrades.filter((t) => t.pnl <= 0).length;
+  const total = wins + losses;
+  if (total === 0) {
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><text x="${w / 2}" y="${h / 2}" fill="#7F8CA6" font-size="12" text-anchor="middle" font-family="Courier New, monospace">No closed trades yet.</text></svg>`;
+  }
+  const winW = (wins / total) * w;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="14" width="${winW}" height="18" fill="#3FD0C9" />
+    <rect x="${winW}" y="14" width="${w - winW}" height="18" fill="#E5484D" />
+    <text x="4" y="42" fill="#3FD0C9" font-size="12" font-family="Courier New, monospace">${wins} win${wins === 1 ? "" : "s"}</text>
+    <text x="${w - 4}" y="42" fill="#E5484D" font-size="12" font-family="Courier New, monospace" text-anchor="end">${losses} loss${losses === 1 ? "" : "es"}</text>
+  </svg>`;
 }
 
 function buildAnalyticsHtmlReport(
@@ -1777,6 +1849,10 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${matchedTrades.length}</b>Closed Trades</div>
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
+<h2>Equity Curve (Realized, FIFO-matched)</h2>
+${buildEquityCurveSvg(matchedTrades)}
+<h2>Win / Loss</h2>
+${buildWinLossBarSvg(matchedTrades)}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
