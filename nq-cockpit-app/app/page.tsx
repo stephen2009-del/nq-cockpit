@@ -2330,12 +2330,18 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </>
     );
   }
-  // Shown regardless of the current Settings toggle, so Live and Demo P&L
-  // are always visible side-by-side rather than requiring a switch to see
-  // one or the other. "manual (legacy)" covers trades logged before source
-  // tagging existed — their true environment isn't known, so they're kept
-  // as their own bucket rather than guessed into either Live or Demo.
+  // Was previously all-time, which meant these three numbers could never
+  // reconcile against the top bar's "Today's P&L" — the whole reason this
+  // panel exists is to answer "does today's P&L mix Demo and Live," so it
+  // needs to use the same "today" scope as that card, not every trade ever.
+  const todayStr = new Date().toDateString();
+  const todaysAllTrades = trades.filter((t) => new Date(t.date).toDateString() === todayStr);
   const envBuckets: { label: string; trades: Trade[] }[] = [
+    { label: "Live", trades: todaysAllTrades.filter((t) => t.source === "live") },
+    { label: "Demo", trades: todaysAllTrades.filter((t) => t.source === "demo") },
+    { label: "Manual (legacy, env unknown)", trades: todaysAllTrades.filter((t) => t.source === "manual") },
+  ];
+  const allTimeEnvBuckets: { label: string; trades: Trade[] }[] = [
     { label: "Live", trades: trades.filter((t) => t.source === "live") },
     { label: "Demo", trades: trades.filter((t) => t.source === "demo") },
     { label: "Manual (legacy, env unknown)", trades: trades.filter((t) => t.source === "manual") },
@@ -2379,10 +2385,24 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   return (
     <>
       <div className="panel-box">
-        <div className="panel-title">P&amp;L by Account (Live vs. Demo)</div>
-        <div className="panel-desc">Always shown regardless of which account is currently selected in Settings — so you can see both without switching back and forth.</div>
+        <div className="panel-title">P&amp;L by Account — Today (Live vs. Demo)</div>
+        <div className="panel-desc">Matches the scope of the "Today's P&amp;L" card at the top of the app \u2014 these three numbers should sum to that figure.</div>
         <div className="stat-grid">
           {envBuckets.map((b) => {
+            const total = b.trades.reduce((s, t) => s + t.pnl, 0);
+            return (
+              <div className="stat-box" key={b.label}>
+                <div className={`stat-num ${b.trades.length === 0 ? "" : total >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+                  {b.trades.length === 0 ? "—" : fmtMoney(total)}
+                </div>
+                <div className="stat-lbl">{b.label} ({b.trades.length})</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="panel-title" style={{ marginTop: 18, fontSize: 13, opacity: 0.75 }}>All-Time (for reference, not scoped to today)</div>
+        <div className="stat-grid">
+          {allTimeEnvBuckets.map((b) => {
             const total = b.trades.reduce((s, t) => s + t.pnl, 0);
             return (
               <div className="stat-box" key={b.label}>
