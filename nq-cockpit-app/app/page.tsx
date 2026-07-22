@@ -663,7 +663,7 @@ export default function Page() {
         </div>
       )}
 
-      {tab === "dashboard" && <Dashboard trades={envFilteredTrades} emoEntries={emoEntries} />}
+      {tab === "dashboard" && <Dashboard trades={trades} emoEntries={emoEntries} />}
 
       {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
 
@@ -2330,6 +2330,17 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </>
     );
   }
+  // Shown regardless of the current Settings toggle, so Live and Demo P&L
+  // are always visible side-by-side rather than requiring a switch to see
+  // one or the other. "manual (legacy)" covers trades logged before source
+  // tagging existed — their true environment isn't known, so they're kept
+  // as their own bucket rather than guessed into either Live or Demo.
+  const envBuckets: { label: string; trades: Trade[] }[] = [
+    { label: "Live", trades: trades.filter((t) => t.source === "live") },
+    { label: "Demo", trades: trades.filter((t) => t.source === "demo") },
+    { label: "Manual (legacy, env unknown)", trades: trades.filter((t) => t.source === "manual") },
+  ];
+
   const wins = trades.filter((t) => t.pnl > 0).length;
   const losses = trades.filter((t) => t.pnl < 0).length;
   const winRate = Math.round((wins / trades.length) * 100);
@@ -2367,6 +2378,24 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
 
   return (
     <>
+      <div className="panel-box">
+        <div className="panel-title">P&amp;L by Account (Live vs. Demo)</div>
+        <div className="panel-desc">Always shown regardless of which account is currently selected in Settings — so you can see both without switching back and forth.</div>
+        <div className="stat-grid">
+          {envBuckets.map((b) => {
+            const total = b.trades.reduce((s, t) => s + t.pnl, 0);
+            return (
+              <div className="stat-box" key={b.label}>
+                <div className={`stat-num ${b.trades.length === 0 ? "" : total >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+                  {b.trades.length === 0 ? "—" : fmtMoney(total)}
+                </div>
+                <div className="stat-lbl">{b.label} ({b.trades.length})</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div className="panel-title" style={{ margin: 0 }}>Performance Summary</div>
