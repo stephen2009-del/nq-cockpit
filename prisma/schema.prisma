@@ -1,0 +1,135 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Rule {
+  id        Int      @id @default(autoincrement())
+  text      String
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model Trade {
+  id                Int      @id @default(autoincrement())
+  date              DateTime @default(now())
+  symbol            String
+  dir               String
+  session           String
+  entry             Float?
+  exit              Float?
+  size              Float?
+  pnl               Float
+  setup             String?
+  emotion           String?
+  notes             String?
+  disciplined       Boolean?
+  checklistSnapshot Json
+  plannedStop       Float?
+  plannedTarget     Float?
+  // "manual" (typed in via Pre-Trade/Journal), "demo", or "live" — which
+  // Tradovate environment (if any) a synced trade came from. Column already
+  // existed in the DB from an earlier migration; this just declares it in
+  // the schema so Prisma actually reads/writes it.
+  source            String   @default("manual")
+}
+
+model Settings {
+  id                   Int    @id @default(1)
+  dailyLossLimit       Float  @default(500)
+  contract             String @default("NQ")
+  multiplier           Float  @default(20)
+  tradingWindowStart   String @default("09:30")
+  tradingWindowEnd     String @default("16:00")
+  cutoffMinutesBeforeClose Int @default(65)
+  openingBufferMinutes Int    @default(10)
+  tradovateEnv         String @default("demo")
+  tradingWindowLocked  Boolean @default(false)
+}
+
+model TradovateOrderLog {
+  id             Int      @id @default(autoincrement())
+  date           DateTime @default(now())
+  env            String
+  symbol         String
+  side           String
+  qty            Int
+  orderType      String
+  limitPrice     Float?
+  stopLossPrice  Float?
+  targetPrice    Float?
+  status         String
+  blockedReason  String?
+  tradovateOrderId String?
+  rawResponse    Json?
+}
+
+model PreMarketPrep {
+  id                Int      @id @default(autoincrement())
+  date              DateTime @default(now())
+  qqqPrice          Float
+  multiplier        Float
+  estimatedMove     Float
+  nqPrice           Float
+  openInterestNotes String?
+}
+
+model OpenInterestLevel {
+  id     Int      @id @default(autoincrement())
+  date   DateTime @default(now())
+  strike Float
+  oi     Float
+  note   String?
+}
+
+model IntradayCheck {
+  id       Int      @id @default(autoincrement())
+  date     DateTime @default(now())
+  qqqPrice Float
+  nqPrice  Float
+}
+
+model TradeLockout {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  until     DateTime
+  reason    String
+}
+
+model EmotionalLogEntry {
+  id   Int      @id @default(autoincrement())
+  date DateTime @default(now())
+  tag  String?
+  note String
+}
+
+model StopManagementRule {
+  id             Int       @id @default(autoincrement())
+  createdAt      DateTime  @default(now())
+  env            String
+  accountId      Int
+  symbol         String
+  direction      String    // "long" or "short"
+  entryPrice     Float
+  qty            Int
+  triggerOffset  Float     // points from entry that trigger the move
+  newStopOffset  Float     // points from entry for the new stop price
+  status         String    @default("active") // active | triggered | failed | cancelled
+  triggeredAt    DateTime?
+  newStopPrice   Float?
+  verified       Boolean?
+  detail         String?
+}
+
+model SchwabToken {
+  id           Int      @id @default(1)
+  accessToken  String
+  refreshToken String
+  accessExpiresAt DateTime
+  refreshExpiresAt DateTime
+  updatedAt    DateTime @updatedAt
+}

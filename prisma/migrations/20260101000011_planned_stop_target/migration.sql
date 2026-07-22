@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Trade" ADD COLUMN "plannedStop" DOUBLE PRECISION;
+ALTER TABLE "Trade" ADD COLUMN "plannedTarget" DOUBLE PRECISION;
