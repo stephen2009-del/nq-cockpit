@@ -297,7 +297,12 @@ export default function Page() {
     const checklistSnapshot = rules.map((r) => ({ rule: r.text, passed: !!checked[r.id] }));
     const trade = await fetch("/api/trades", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, pnl, disciplined, checklistSnapshot }),
+      // Tags this entry with whichever Tradovate account (Demo/Live) is
+      // currently selected in Settings — otherwise every manually-logged
+      // trade defaulted to the generic "manual" tag regardless of account,
+      // which made the Demo/Live filter on the top summary bar and
+      // Dashboard a no-op for almost all real usage.
+      body: JSON.stringify({ ...form, pnl, disciplined, checklistSnapshot, source: settings.tradovateEnv }),
     }).then((r) => r.json());
     setTrades((t) => [...t, trade]);
     const c: Record<number, boolean> = {};
