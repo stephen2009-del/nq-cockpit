@@ -31,6 +31,11 @@ model Trade {
   checklistSnapshot Json
   plannedStop       Float?
   plannedTarget     Float?
+  // "manual" (typed in via Pre-Trade/Journal), "demo", or "live" — which
+  // Tradovate environment (if any) a synced trade came from. Column already
+  // existed in the DB from an earlier migration; this just declares it in
+  // the schema so Prisma actually reads/writes it.
+  source            String   @default("manual")
 }
 
 model Settings {

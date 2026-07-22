@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
       checklistSnapshot: body.checklistSnapshot,
       plannedStop: body.plannedStop ? parseFloat(body.plannedStop) : null,
       plannedTarget: body.plannedTarget ? parseFloat(body.plannedTarget) : null,
+      source: body.source ?? "manual",
     },
   });
   return NextResponse.json(trade);

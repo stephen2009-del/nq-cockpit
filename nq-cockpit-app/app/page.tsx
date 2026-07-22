@@ -20,6 +20,7 @@ type Trade = {
   emotion: string | null;
   notes: string | null;
   disciplined: boolean | null; // null = no self-reported checklist (e.g. broker-synced trades)
+  source: string; // "manual" | "demo" | "live" — which Tradovate environment (if any) this came from
   checklistSnapshot: { rule: string; passed: boolean }[];
   plannedStop: number | null;
   plannedTarget: number | null;
@@ -246,15 +247,21 @@ export default function Page() {
   }
 
   // ---- derived stats ----
-  const ratedTrades = trades.filter((t) => t.disciplined !== null);
+  // Trades synced from Tradovate carry which environment (demo/live) they
+  // came from. Manually-logged trades aren't tied to either and are always
+  // included. Without this filter, a demo test trade's P&L would silently
+  // combine with real Live P&L in the exact numbers used for the Daily Loss
+  // Limit guard's display and the Discipline Gauge — worth being strict here.
+  const envFilteredTrades = trades.filter((t) => t.source === "manual" || t.source === settings.tradovateEnv);
+  const ratedTrades = envFilteredTrades.filter((t) => t.disciplined !== null);
   const disciplineScore = ratedTrades.length ? Math.round((ratedTrades.filter((t) => t.disciplined).length / ratedTrades.length) * 100) : null;
   const today = new Date().toDateString();
-  const todaysTrades = trades.filter((t) => new Date(t.date).toDateString() === today);
+  const todaysTrades = envFilteredTrades.filter((t) => new Date(t.date).toDateString() === today);
   const todaysPnl = todaysTrades.reduce((s, t) => s + t.pnl, 0);
   let streak = 0;
-  for (let i = trades.length - 1; i >= 0; i--) {
-    if (trades[i].disciplined === null) continue; // unrated (synced) trades don't affect the streak
-    if (trades[i].disciplined) streak++;
+  for (let i = envFilteredTrades.length - 1; i >= 0; i--) {
+    if (envFilteredTrades[i].disciplined === null) continue; // unrated (synced) trades don't affect the streak
+    if (envFilteredTrades[i].disciplined) streak++;
     else break;
   }
   const limit = settings.dailyLossLimit;
@@ -582,7 +589,7 @@ export default function Page() {
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table>
-                <thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th><th>Plan Check</th><th></th></tr></thead>
+                <thead><tr><th>Time</th><th>Sym</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Source</th><th>Emotion</th><th>Plan Check</th><th></th></tr></thead>
                 <tbody>
                   {[...trades].reverse().map((t) => {
                     const d = new Date(t.date);
@@ -595,6 +602,7 @@ export default function Page() {
                         <td>{t.setup || "—"}</td>
                         <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
                         <td><span className={`tag ${t.disciplined === null ? "na" : t.disciplined ? "clean" : "flag"}`}>{t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
+                        <td><span className={`tag ${t.source === "live" ? "short" : t.source === "demo" ? "na" : "long"}`}>{t.source.toUpperCase()}</span></td>
                         <td>{t.emotion}</td>
                         <td>
                           {flags.length === 0 ? "—" : flags.map((f, i) => (
@@ -650,7 +658,7 @@ export default function Page() {
         </div>
       )}
 
-      {tab === "dashboard" && <Dashboard trades={trades} emoEntries={emoEntries} />}
+      {tab === "dashboard" && <Dashboard trades={envFilteredTrades} emoEntries={emoEntries} />}
 
       {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
 
@@ -2099,6 +2107,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
         emotion: null,
         notes: "Synced from Tradovate \u2014 auto-imported from real fills, not self-reported.",
         disciplined: null, // no checklist exists for a broker fill; leave unrated rather than assuming clean
+        source: settings.tradovateEnv === "live" ? "live" : "demo",
         checklistSnapshot: [],
         plannedStop: null,
         plannedTarget: null,
