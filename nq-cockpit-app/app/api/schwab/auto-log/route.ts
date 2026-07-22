@@ -22,6 +22,9 @@ function extractQqqPrice(body: any, symbol: string): number | null {
   return null;
 }
 
+// Not currently used by the automatic scheduler (instrumentation.ts uses
+// Alpaca instead, via lib/intradayAutoLog.ts) — kept as a manually-triggerable
+// fallback in case Schwab ends up being the preferred data source later.
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
   if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {

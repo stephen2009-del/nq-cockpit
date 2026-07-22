@@ -189,7 +189,12 @@ export async function POST(req: NextRequest) {
   try {
     const enrichedFills = await getEnrichedFills(env, parseInt(accountId));
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // Was: new Date(now.getFullYear(), now.getMonth(), now.getDate()), which
+    // uses the SERVER's local timezone (UTC on Railway) — that silently rolls
+    // "today" over at 5pm Pacific instead of midnight, not matching what a
+    // trader means by "today's" realized P&L. Use the same ET-based boundary
+    // the trading-window logic already uses elsewhere.
+    const startOfDay = etTimeTodayToUtc("00:00", now);
     const todaysFills = enrichedFills.filter((f: any) => new Date(f.timestamp) >= startOfDay);
     const matched = matchFillsToTrades(todaysFills as any, settings.multiplier);
     const todaysRealizedPnl = matched.reduce((s, t) => s + t.pnl, 0);

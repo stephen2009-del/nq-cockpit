@@ -39,7 +39,7 @@ function toMinutes(hhmm: string): number {
   return h * 60 + m;
 }
 
-function currentEtMinutes(now: Date): number {
+export function currentEtMinutes(now: Date): number {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     hour: "2-digit",

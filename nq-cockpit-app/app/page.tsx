@@ -1039,7 +1039,7 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 ${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} · Estimated move: ±${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
 ${svg}
 <table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
-<p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Built from manually logged Intraday checks — not a live market data feed.</p>
+<p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
 </body></html>`;
 
   return html;
@@ -1190,7 +1190,7 @@ function IntradayTab({
           <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep))} disabled={checks.length === 0}>View HTML</button>
           <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
         </div>
-        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Built from your manual checks — not a live feed.</div>
+        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am\u20134:00pm ET) \u2014 you can still add a manual check any time too.</div>
         <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
 
