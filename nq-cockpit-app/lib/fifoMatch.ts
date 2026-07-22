@@ -67,6 +67,14 @@ export function analyzeHoldTimes(trades: MatchedTrade[]): HoldTimeAnalysis {
   return { avgWinnerHoldMinutes, avgLoserHoldMinutes, patternFlag, flaggedTrades };
 }
 
+// MNQ (Micro E-mini Nasdaq-100) is fixed by CME at exactly 1/10th of NQ's
+// point value — this isn't a user-configurable setting, it's a contract
+// spec. Previously every symbol used the same `multiplier` (meant for NQ),
+// which overstated MNQ fills' P&L by 10x.
+function pointValueFor(symbol: string, nqMultiplier: number): number {
+  return symbol.startsWith("MNQ") ? nqMultiplier / 10 : nqMultiplier;
+}
+
 // Matches fills FIFO, per symbol, into closed round-trip trades. Any fills
 // left over at the end (an open position) are not included — those show up
 // in the live Positions data instead.
@@ -94,10 +102,11 @@ export function matchFillsToTrades(fills: TradovateFill[], multiplier: number): 
         const lot = queue[0];
         const matchedQty = Math.min(lot.qty, remaining);
         const side: "long" | "short" = lot.action === "Buy" ? "long" : "short";
+        const pointValue = pointValueFor(symbol, multiplier);
         const pnl =
           side === "long"
-            ? (fill.price - lot.price) * multiplier * matchedQty
-            : (lot.price - fill.price) * multiplier * matchedQty;
+            ? (fill.price - lot.price) * pointValue * matchedQty
+            : (lot.price - fill.price) * pointValue * matchedQty;
 
         trades.push({
           symbol,
