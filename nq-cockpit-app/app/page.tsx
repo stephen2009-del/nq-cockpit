@@ -1761,52 +1761,91 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
   return { coords, zeroY, points };
 }
 
-// Builds a standalone inline SVG equity curve for the exported HTML report
-// (can't reuse the React IntradayChart component here since this string gets
-// dropped into a plain downloaded/viewed .html file with no React runtime).
-function buildEquityCurveSvg(matchedTrades: MatchedTrade[]): string {
-  const w = 760, h = 240, pad = 36;
+// Builds the Chart.js <canvas> + <script> block for the exported HTML
+// report. Loaded from a CDN (cdnjs) since this is a standalone downloaded
+// file with no bundler/build step — needs internet access when opened to
+// actually render, same as any report that embeds a hosted chart library.
+// Zoom/pan isn't included here (would mean a second CDN plugin + version
+// matching to get right) — flag if that's still wanted after seeing these.
+function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): string {
   if (matchedTrades.length === 0) {
-    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><text x="${w / 2}" y="${h / 2}" fill="#7F8CA6" font-size="13" text-anchor="middle" font-family="Courier New, monospace">No closed trades yet.</text></svg>`;
+    return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
   }
-  const { coords, zeroY, points } = equityCurvePoints(matchedTrades, w, h, pad);
-  const last = points[points.length - 1];
-  const lineColor = last >= 0 ? "#3FD0C9" : "#E5484D";
-  const dots = points
-    .map((p, i) => {
-      const stepX = points.length > 1 ? (w - 2 * pad) / (points.length - 1) : 0;
-      const min = Math.min(0, ...points, 0);
-      const max = Math.max(0, ...points, 0);
-      const range = max - min || 1;
-      const x = pad + i * stepX;
-      const y = h - pad - ((p - min) / range) * (h - 2 * pad);
-      return `<circle cx="${x}" cy="${y}" r="3" fill="${p >= 0 ? "#3FD0C9" : "#E5484D"}" />`;
-    })
-    .join("");
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-    <line x1="${pad}" y1="${zeroY}" x2="${w - pad}" y2="${zeroY}" stroke="#263654" stroke-width="1" stroke-dasharray="4,4" />
-    <polyline points="${coords}" fill="none" stroke="${lineColor}" stroke-width="2" />
-    ${dots}
-  </svg>`;
-}
 
-// Simple horizontal win/loss bar — wins vs. losses by count, not $, so a
-// handful of big losers doesn't visually dominate a mostly-winning session.
-function buildWinLossBarSvg(matchedTrades: MatchedTrade[]): string {
-  const w = 760, h = 46;
+  let cum = 0;
+  const equityLabels = matchedTrades.map((t) => new Date(t.exitTime).toLocaleString());
+  const equityData = matchedTrades.map((t) => (cum += t.pnl));
+  const perTradePnl = matchedTrades.map((t) => t.pnl);
+  const perTradeColors = perTradePnl.map((p) => (p >= 0 ? "#3FD0C9" : "#E5484D"));
   const wins = matchedTrades.filter((t) => t.pnl > 0).length;
   const losses = matchedTrades.filter((t) => t.pnl <= 0).length;
-  const total = wins + losses;
-  if (total === 0) {
-    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><text x="${w / 2}" y="${h / 2}" fill="#7F8CA6" font-size="12" text-anchor="middle" font-family="Courier New, monospace">No closed trades yet.</text></svg>`;
-  }
-  const winW = (wins / total) * w;
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="14" width="${winW}" height="18" fill="#3FD0C9" />
-    <rect x="${winW}" y="14" width="${w - winW}" height="18" fill="#E5484D" />
-    <text x="4" y="42" fill="#3FD0C9" font-size="12" font-family="Courier New, monospace">${wins} win${wins === 1 ? "" : "s"}</text>
-    <text x="${w - 4}" y="42" fill="#E5484D" font-size="12" font-family="Courier New, monospace" text-anchor="end">${losses} loss${losses === 1 ? "" : "es"}</text>
-  </svg>`;
+
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses }).replace(/</g, "\\u003c");
+
+  return `
+<canvas id="equityChart" height="90"></canvas>
+<h2>P&amp;L Per Trade</h2>
+<canvas id="pnlBarChart" height="90"></canvas>
+<h2>Win / Loss</h2>
+<canvas id="winLossChart" height="120" style="max-width:280px;"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script>
+(function() {
+  var d = ${dataJson};
+  var axisColor = "#7F8CA6";
+  var gridColor = "#263654";
+  Chart.defaults.color = axisColor;
+  Chart.defaults.font.family = "'Courier New', monospace";
+
+  new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: {
+      labels: d.equityLabels,
+      datasets: [{
+        label: 'Cumulative Realized P&L',
+        data: d.equityData,
+        borderColor: d.equityData[d.equityData.length - 1] >= 0 ? '#3FD0C9' : '#E5484D',
+        backgroundColor: 'rgba(63,208,201,0.08)',
+        fill: true,
+        tension: 0.15,
+        pointRadius: 3,
+        pointBackgroundColor: d.equityData.map(function(v) { return v >= 0 ? '#3FD0C9' : '#E5484D'; }),
+      }]
+    },
+    options: {
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) { return 'Cumulative: ' + ctx.parsed.y.toFixed(2); } } } },
+      scales: {
+        x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: gridColor } },
+        y: { grid: { color: gridColor } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('pnlBarChart'), {
+    type: 'bar',
+    data: {
+      labels: d.equityLabels,
+      datasets: [{ label: 'P&L per trade', data: d.perTradePnl, backgroundColor: d.perTradeColors }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: gridColor } },
+        y: { grid: { color: gridColor } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('winLossChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Wins (' + d.wins + ')', 'Losses (' + d.losses + ')'],
+      datasets: [{ data: [d.wins, d.losses], backgroundColor: ['#3FD0C9', '#E5484D'] }]
+    },
+    options: { plugins: { legend: { position: 'bottom' } } }
+  });
+})();
+</script>`;
 }
 
 function buildAnalyticsHtmlReport(
@@ -1850,9 +1889,7 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${buildEquityCurveSvg(matchedTrades)}
-<h2>Win / Loss</h2>
-${buildWinLossBarSvg(matchedTrades)}
+${buildAnalyticsChartsHtml(matchedTrades)}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
