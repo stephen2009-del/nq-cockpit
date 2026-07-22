@@ -1767,9 +1767,26 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
 // actually render, same as any report that embeds a hosted chart library.
 // Zoom/pan isn't included here (would mean a second CDN plugin + version
 // matching to get right) — flag if that's still wanted after seeing these.
-function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): string {
+async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<string> {
   if (matchedTrades.length === 0) {
     return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
+  }
+
+  // Chart.js is embedded directly (fetched from this app's own /public folder,
+  // not a CDN) so the exported report is fully self-contained and doesn't
+  // depend on cdnjs being reachable when someone actually opens the file —
+  // that CDN load silently failed in testing (blocked by something in the
+  // viewer's browser/network), leaving the canvases blank with no visible
+  // error in the report itself.
+  let chartJsSource = "";
+  try {
+    const res = await fetch("/vendor/chart.umd.min.js");
+    if (res.ok) chartJsSource = await res.text();
+  } catch {
+    // handled below via the empty-string fallback
+  }
+  if (!chartJsSource) {
+    return `<p style="color:#E5484D;font-size:13px;">Charts unavailable — couldn't load the charting library from this app. The rest of the report (stats and trade table) is unaffected.</p>`;
   }
 
   let cum = 0;
@@ -1788,7 +1805,7 @@ function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): string {
 <canvas id="pnlBarChart" height="90"></canvas>
 <h2>Win / Loss</h2>
 <canvas id="winLossChart" height="120" style="max-width:280px;"></canvas>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script>${chartJsSource}</script>
 <script>
 (function() {
   var d = ${dataJson};
@@ -1848,7 +1865,7 @@ function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): string {
 </script>`;
 }
 
-function buildAnalyticsHtmlReport(
+async function buildAnalyticsHtmlReport(
   accountLabel: string,
   cashBalance: any,
   matchedTrades: MatchedTrade[],
@@ -1889,7 +1906,7 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${buildAnalyticsChartsHtml(matchedTrades)}
+${await buildAnalyticsChartsHtml(matchedTrades)}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
@@ -2145,8 +2162,20 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
                 >
                   {syncing ? "Syncing…" : unsyncedTrades.length === 0 && matchedTrades.length > 0 ? "All Synced" : `Sync to Journal${unsyncedTrades.length ? ` (${unsyncedTrades.length})` : ""}`}
                 </button>
-                <button className="btn small ghost" onClick={() => viewHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate))}>View HTML</button>
-                <button className="btn small ghost" onClick={() => downloadHtmlReport(buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate), `nq-cockpit-analytics-${new Date().toISOString().slice(0, 10)}.html`)}>Download HTML</button>
+                <button
+                  className="btn small ghost"
+                  onClick={() => {
+                    const win = window.open("", "_blank");
+                    buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate).then((html) => {
+                      if (!win) return; // popup was blocked despite opening synchronously — nothing more we can do
+                      const blob = new Blob([html], { type: "text/html" });
+                      win.location.href = URL.createObjectURL(blob);
+                    });
+                  }}
+                >
+                  View HTML
+                </button>
+                <button className="btn small ghost" onClick={async () => downloadHtmlReport(await buildAnalyticsHtmlReport(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate), `nq-cockpit-analytics-${new Date().toISOString().slice(0, 10)}.html`)}>Download HTML</button>
                 <button className="btn small ghost" onClick={() => downloadAnalyticsPdf(accountLabel, data.cashBalance, matchedTrades, totalPnl, winRate)}>Download PDF</button>
               </div>
             </div>
