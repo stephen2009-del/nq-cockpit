@@ -1844,7 +1844,7 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
 <h2>P&amp;L Per Trade</h2>
 <canvas id="pnlBarChart" height="90"></canvas>
 <h2>Win / Loss</h2>
-<canvas id="winLossChart" height="120" style="max-width:280px;"></canvas>
+<div style="width:220px;height:220px;"><canvas id="winLossChart"></canvas></div>
 <script>${chartJsSource}</script>
 <script>
 (function() {
@@ -1902,7 +1902,7 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
       labels: ['Wins (' + d.wins + ')', 'Losses (' + d.losses + ')'],
       datasets: [{ data: [d.wins, d.losses], backgroundColor: ['#3FD0C9', '#E5484D'] }]
     },
-    options: { plugins: { legend: { position: 'bottom' } } }
+    options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
   });
 })();
 </script>`;
@@ -3127,6 +3127,25 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
               }}
             >
               View HTML
+            </button>
+            <button
+              className="btn small ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                buildDayReportHtml(day).then((html) => {
+                  const blob = new Blob([html], { type: "text/html" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.html`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                });
+              }}
+            >
+              Download HTML
             </button>
             <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
           </div>
