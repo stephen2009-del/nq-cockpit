@@ -1296,6 +1296,8 @@ function IntradayTab({
         <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
 
+      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} />
+
       <div className="panel-box">
         <div className="panel-title">Today's Checks</div>
         {checks.length === 0 ? (
@@ -1317,8 +1319,6 @@ function IntradayTab({
           </div>
         )}
       </div>
-
-      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} />
     </>
   );
 }
