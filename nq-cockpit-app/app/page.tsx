@@ -189,6 +189,7 @@ export default function Page() {
 
   const [form, setForm] = useState({
     symbol: "NQ", dir: "long", session: "NY Open", entry: "", exit: "", size: "1",
+    entryTime: "", exitTime: "",
     pnl: "", setup: "", emotion: "Calm / neutral", notes: "", plannedStop: "", plannedTarget: "",
   });
 
@@ -296,6 +297,14 @@ export default function Page() {
     if (isNaN(pnl)) { alert("Enter a P&L amount (or fill entry/exit/contracts to auto-calc)."); return; }
     const disciplined = rules.every((r) => checked[r.id]);
     const checklistSnapshot = rules.map((r) => ({ rule: r.text, passed: !!checked[r.id] }));
+    // Entry/Exit Time fields are just a time-of-day (HH:MM) — assumes the
+    // trade happened today, since this form is for logging trades as you
+    // take them, not backdating old ones. Left blank, entryDate stays null
+    // (hold time won't be available for this trade) and date defaults to
+    // "now" server-side, same as before these fields existed.
+    const todayStr = new Date().toDateString();
+    const entryDateIso = form.entryTime ? new Date(`${todayStr} ${form.entryTime}`).toISOString() : undefined;
+    const exitDateIso = form.exitTime ? new Date(`${todayStr} ${form.exitTime}`).toISOString() : undefined;
     const trade = await fetch("/api/trades", {
       method: "POST", headers: { "Content-Type": "application/json" },
       // Tags this entry with whichever Tradovate account (Demo/Live) is
@@ -303,13 +312,17 @@ export default function Page() {
       // trade defaulted to the generic "manual" tag regardless of account,
       // which made the Demo/Live filter on the top summary bar and
       // Dashboard a no-op for almost all real usage.
-      body: JSON.stringify({ ...form, pnl, disciplined, checklistSnapshot, source: settings.tradovateEnv }),
+      body: JSON.stringify({
+        ...form, pnl, disciplined, checklistSnapshot, source: settings.tradovateEnv,
+        ...(entryDateIso ? { entryDate: entryDateIso } : {}),
+        ...(exitDateIso ? { date: exitDateIso } : {}),
+      }),
     }).then((r) => r.json());
     setTrades((t) => [...t, trade]);
     const c: Record<number, boolean> = {};
     rules.forEach((r) => (c[r.id] = false));
     setChecked(c);
-    setForm((f) => ({ ...f, entry: "", exit: "", pnl: "", setup: "", notes: "", plannedStop: "", plannedTarget: "" }));
+    setForm((f) => ({ ...f, entry: "", exit: "", entryTime: "", exitTime: "", pnl: "", setup: "", notes: "", plannedStop: "", plannedTarget: "" }));
     setConfirmMsg("✓ Trade logged.");
     setTimeout(() => setConfirmMsg(null), 2500);
   }
@@ -563,6 +576,19 @@ export default function Page() {
                 )}
               </div>
               <div className="field"><label>Contracts</label><input type="number" min="1" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} /></div>
+            </div>
+            <div className="grid2">
+              <div className="field">
+                <label>Entry Time (optional)</label>
+                <input type="time" value={form.entryTime} onChange={(e) => setForm({ ...form, entryTime: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Exit Time (optional)</label>
+                <input type="time" value={form.exitTime} onChange={(e) => setForm({ ...form, exitTime: e.target.value })} />
+              </div>
+            </div>
+            <div className="panel-desc" style={{ marginTop: -8 }}>
+              Both optional — fill them in and Hold Time will show correctly in Reports and the Journal. Leave blank and it'll show — same as before these fields existed. Assumes today's date (this form is for logging trades as you take them, not backdating old ones).
             </div>
             <div className="grid2">
               <div className="field"><label>P&amp;L ($) — auto or manual</label><input type="number" step="0.01" value={form.pnl} onChange={(e) => setForm({ ...form, pnl: e.target.value })} /></div>
@@ -1204,7 +1230,7 @@ function IntradayTab({
           <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep))} disabled={checks.length === 0}>View HTML</button>
           <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
         </div>
-        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am\u20134:00pm ET) \u2014 you can still add a manual check any time too.</div>
+        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am–4:00pm ET) — you can still add a manual check any time too.</div>
         <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
 
@@ -2388,7 +2414,7 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
     <>
       <div className="panel-box">
         <div className="panel-title">P&amp;L by Account — Today (Live vs. Demo)</div>
-        <div className="panel-desc">Matches the scope of the "Today's P&amp;L" card at the top of the app \u2014 these three numbers should sum to that figure.</div>
+        <div className="panel-desc">Matches the scope of the "Today's P&amp;L" card at the top of the app — these three numbers should sum to that figure.</div>
         <div className="stat-grid">
           {envBuckets.map((b) => {
             const total = b.trades.reduce((s, t) => s + t.pnl, 0);
