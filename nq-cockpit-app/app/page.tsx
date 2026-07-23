@@ -2805,6 +2805,33 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
 // Only computable when entryDate is actually known (real synced Tradovate
 // fills going forward) — returns null rather than guessing for manual
 // entries or trades synced before entryDate existed.
+// Finds instances where a trade's entry happened while an earlier,
+// same-symbol, same-direction trade's position was still open, at a price
+// that made the earlier position worse (further underwater) rather than
+// better. Only works for trades with entryDate populated — for anything
+// missing it (older manual entries, trades synced before entryDate
+// existed), there's no way to know if positions overlapped in time at all,
+// so those are silently excluded rather than guessed.
+type AddedToLoserInstance = { earlier: Trade; later: Trade };
+function findAddedToLoserInstances(trades: Trade[]): AddedToLoserInstance[] {
+  const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
+  const results: AddedToLoserInstance[] = [];
+  for (const earlier of withEntry) {
+    for (const later of withEntry) {
+      if (earlier.id === later.id) continue;
+      if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
+      const earlierEntry = new Date(earlier.entryDate!).getTime();
+      const earlierExit = new Date(earlier.date).getTime();
+      const laterEntry = new Date(later.entryDate!).getTime();
+      // "later" must have entered while "earlier" was still open.
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const adverse = earlier.dir === "long" ? later.entry! < earlier.entry! : later.entry! > earlier.entry!;
+      if (adverse) results.push({ earlier, later });
+    }
+  }
+  return results;
+}
+
 function holdTimeLabel(t: Trade): string | null {
   if (!t.entryDate) return null;
   const ms = new Date(t.date).getTime() - new Date(t.entryDate).getTime();
@@ -2844,10 +2871,13 @@ function groupTradesByDay(trades: Trade[]) {
 }
 
 async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number]): Promise<string> {
+  const addedToLoser = findAddedToLoserInstances(day.trades);
+  const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   const rows = day.trades
     .map(
       (t) => `
-    <tr>
+    <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : ""}>
+      <td>${laterIds.has(t.id) ? "\u26a0" : ""}</td>
       <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
       <td>${t.source.toUpperCase()}</td>
       <td>${t.dir.toUpperCase()}</td>
@@ -2886,11 +2916,16 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     <div><strong>Win rate:</strong> ${day.winRate}%</div>
     <div><strong>Clean/Flagged${day.unrated ? "/Unrated" : ""}:</strong> ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}</div>
   </div>
+  ${addedToLoser.length > 0 ? `
+  <div style="border:1px solid #E5484D;border-radius:6px;padding:12px 14px;background:rgba(229,72,77,0.08);margin-bottom:16px;">
+    <div style="font-weight:bold;margin-bottom:6px;">\u26a0 Added to a losing position \u2014 ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
+    ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.</div>`).join("")}
+  </div>` : ""}
   <h2>Equity Curve</h2>
   ${chartsHtml}
   <h2>Trades</h2>
   <table>
-    <thead><tr><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+    <thead><tr><th></th><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
 </body></html>`;
@@ -2898,6 +2933,8 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
 
 function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
   const doc = new jsPDF({ orientation: "landscape" });
+  const addedToLoser = findAddedToLoserInstances(day.trades);
+  const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   let y = 20;
   doc.setFont("courier", "bold");
   doc.setFontSize(16);
@@ -2913,18 +2950,28 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
   doc.text(`Trades: ${day.trades.length}`, 70, y);
   doc.text(`Win rate: ${day.winRate}%`, 120, y);
   doc.text(`Clean/Flagged${day.unrated ? "/Unrated" : ""}: ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}`, 160, y);
-  y += 10;
+  y += 8;
+
+  if (addedToLoser.length > 0) {
+    doc.setTextColor(229, 72, 77);
+    doc.text(`\u26a0 Added to a losing position \u00d7 ${addedToLoser.length} (marked with \u26a0 below)`, 14, y);
+    doc.setTextColor(0, 0, 0);
+    y += 8;
+  } else {
+    y += 2;
+  }
 
   const cols = [
-    { label: "Time", x: 14 },
-    { label: "Account", x: 40 },
-    { label: "Dir", x: 65 },
-    { label: "Entry", x: 85 },
-    { label: "Exit", x: 110 },
-    { label: "Hold", x: 135 },
-    { label: "P&L", x: 160 },
-    { label: "Discipline", x: 190 },
-    { label: "Emotion", x: 225 },
+    { label: "", x: 14 },
+    { label: "Time", x: 20 },
+    { label: "Account", x: 46 },
+    { label: "Dir", x: 71 },
+    { label: "Entry", x: 91 },
+    { label: "Exit", x: 116 },
+    { label: "Hold", x: 141 },
+    { label: "P&L", x: 166 },
+    { label: "Discipline", x: 196 },
+    { label: "Emotion", x: 231 },
   ];
   doc.setFont("courier", "bold");
   cols.forEach((c) => doc.text(c.label, c.x, y));
@@ -2937,15 +2984,20 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
       y = 20;
     }
     const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    doc.text(time, cols[0].x, y);
-    doc.text(t.source.toUpperCase(), cols[1].x, y);
-    doc.text(t.dir.toUpperCase(), cols[2].x, y);
-    doc.text(t.entry !== null ? String(t.entry) : "-", cols[3].x, y);
-    doc.text(t.exit !== null ? String(t.exit) : "-", cols[4].x, y);
-    doc.text(holdTimeLabel(t) ?? "-", cols[5].x, y);
-    doc.text(fmtMoney(t.pnl), cols[6].x, y);
-    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[7].x, y);
-    doc.text((t.emotion || "-").slice(0, 14), cols[8].x, y);
+    if (laterIds.has(t.id)) {
+      doc.setTextColor(229, 72, 77);
+      doc.text("!", cols[0].x, y);
+    }
+    doc.text(time, cols[1].x, y);
+    doc.text(t.source.toUpperCase(), cols[2].x, y);
+    doc.text(t.dir.toUpperCase(), cols[3].x, y);
+    doc.text(t.entry !== null ? String(t.entry) : "-", cols[4].x, y);
+    doc.text(t.exit !== null ? String(t.exit) : "-", cols[5].x, y);
+    doc.text(holdTimeLabel(t) ?? "-", cols[6].x, y);
+    doc.text(fmtMoney(t.pnl), cols[7].x, y);
+    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[8].x, y);
+    doc.text((t.emotion || "-").slice(0, 14), cols[9].x, y);
+    if (laterIds.has(t.id)) doc.setTextColor(0, 0, 0);
     y += 6;
   });
 
@@ -2974,7 +3026,10 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
       {days.length === 0 ? (
         <div className="empty-state" style={{ marginTop: 12 }}><div className="big">🗒️</div>No trades logged for this filter yet.</div>
       ) : (
-        days.map((day) => (
+        days.map((day) => {
+        const addedToLoser = findAddedToLoserInstances(day.trades);
+        const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+        return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
             style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", cursor: "pointer", background: "var(--panel-2)" }}
@@ -2984,6 +3039,9 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
               <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
               <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
+              {addedToLoser.length > 0 && (
+                <span className="tag flag">⚠ Added to loser × {addedToLoser.length}</span>
+              )}
             </div>
             <button
               className="btn small ghost"
@@ -3003,11 +3061,24 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
+              {addedToLoser.length > 0 && (
+                <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid var(--red)", borderRadius: 6, background: "rgba(229,72,77,0.08)" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>⚠ Added to a losing position — {addedToLoser.length} instance{addedToLoser.length === 1 ? "" : "s"}</div>
+                  {addedToLoser.map((inst, i) => (
+                    <div key={i} className="card-sub" style={{ marginTop: i === 0 ? 0 : 4 }}>
+                      {inst.earlier.symbol} {inst.earlier.dir.toUpperCase()}: entered {inst.earlier.entry} at {new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })},
+                      then added at {inst.later.entry} at {new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.
+                    </div>
+                  ))}
+                  <div className="card-sub" style={{ marginTop: 6, opacity: 0.7 }}>Only detects this for trades with a recorded entry time (Sync to Journal, or manually logged with Entry Time filled in) — older entries without one aren't included.</div>
+                </div>
+              )}
               <table>
-                <thead><tr><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+                <thead><tr><th></th><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
                 <tbody>
                   {day.trades.map((t) => (
-                    <tr key={t.id}>
+                    <tr key={t.id} style={laterIds.has(t.id) ? { background: "rgba(229,72,77,0.12)" } : undefined}>
+                      <td>{laterIds.has(t.id) ? "⚠" : ""}</td>
                       <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
                       <td><span className={`tag ${t.source === "live" ? "flag" : t.source === "demo" ? "clean" : "na"}`}>{t.source.toUpperCase()}</span></td>
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
@@ -3024,7 +3095,8 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
             </div>
           )}
         </div>
-        ))
+        );
+        })
       )}
     </div>
   );
