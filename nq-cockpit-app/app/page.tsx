@@ -1807,8 +1807,8 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
 // actually render, same as any report that embeds a hosted chart library.
 // Zoom/pan isn't included here (would mean a second CDN plugin + version
 // matching to get right) — flag if that's still wanted after seeing these.
-async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<string> {
-  if (matchedTrades.length === 0) {
+async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise<string> {
+  if (items.length === 0) {
     return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
   }
 
@@ -1830,12 +1830,12 @@ async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<
   }
 
   let cum = 0;
-  const equityLabels = matchedTrades.map((t) => new Date(t.exitTime).toLocaleString());
-  const equityData = matchedTrades.map((t) => (cum += t.pnl));
-  const perTradePnl = matchedTrades.map((t) => t.pnl);
+  const equityLabels = items.map((t) => t.label);
+  const equityData = items.map((t) => (cum += t.pnl));
+  const perTradePnl = items.map((t) => t.pnl);
   const perTradeColors = perTradePnl.map((p) => (p >= 0 ? "#3FD0C9" : "#E5484D"));
-  const wins = matchedTrades.filter((t) => t.pnl > 0).length;
-  const losses = matchedTrades.filter((t) => t.pnl <= 0).length;
+  const wins = items.filter((t) => t.pnl > 0).length;
+  const losses = items.filter((t) => t.pnl <= 0).length;
 
   const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses }).replace(/</g, "\\u003c");
 
@@ -1946,7 +1946,7 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${await buildAnalyticsChartsHtml(matchedTrades)}
+${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl })))}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
@@ -2840,6 +2840,59 @@ function groupTradesByDay(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
+async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number]): Promise<string> {
+  const rows = day.trades
+    .map(
+      (t) => `
+    <tr>
+      <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${t.source.toUpperCase()}</td>
+      <td>${t.dir.toUpperCase()}</td>
+      <td>${t.entry ?? "-"}</td>
+      <td>${t.exit ?? "-"}</td>
+      <td>${holdTimeLabel(t) ?? "-"}</td>
+      <td style="color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${fmtMoney(t.pnl)}</td>
+      <td>${t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</td>
+      <td>${t.emotion || "-"}</td>
+    </tr>`
+    )
+    .join("");
+
+  const chartsHtml = await buildChartsHtml(
+    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl }))
+  );
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<style>
+  body{background:#0B1220;color:#E8EDF5;font-family:'Courier New',monospace;padding:24px;}
+  h1{color:#F5A623;margin:0 0 4px;font-size:22px;}
+  h2{color:#3FD0C9;font-size:15px;margin:22px 0 8px;}
+  .sub{color:#7F8CA6;margin:0 0 16px;}
+  .stats{display:flex;gap:24px;margin-bottom:16px;font-size:14px;flex-wrap:wrap;}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px;}
+  th{text-align:left;padding:6px 10px;color:#7F8CA6;border-bottom:1px solid #263654;}
+  td{padding:6px 10px;border-bottom:1px solid #263654;}
+</style></head>
+<body>
+  <h1>NQ COCKPIT — Daily Report</h1>
+  <p class="sub">${day.dateStr}</p>
+  <div class="stats">
+    <div><strong>P&amp;L:</strong> ${fmtMoney(day.pnl)}</div>
+    <div><strong>Trades:</strong> ${day.trades.length}</div>
+    <div><strong>Win rate:</strong> ${day.winRate}%</div>
+    <div><strong>Clean/Flagged${day.unrated ? "/Unrated" : ""}:</strong> ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}</div>
+  </div>
+  <h2>Equity Curve</h2>
+  ${chartsHtml}
+  <h2>Trades</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+</body></html>`;
+}
+
 function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
   const doc = new jsPDF({ orientation: "landscape" });
   let y = 20;
@@ -2929,6 +2982,20 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
               <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
             </div>
+            <button
+              className="btn small ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                const win = window.open("", "_blank");
+                buildDayReportHtml(day).then((html) => {
+                  if (!win) return;
+                  const blob = new Blob([html], { type: "text/html" });
+                  win.location.href = URL.createObjectURL(blob);
+                });
+              }}
+            >
+              View HTML
+            </button>
             <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
