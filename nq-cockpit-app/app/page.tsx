@@ -1866,11 +1866,14 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
         fill: true,
         tension: 0.15,
         pointRadius: 3,
-        pointBackgroundColor: d.equityData.map(function(v) { return v >= 0 ? '#3FD0C9' : '#E5484D'; }),
+        pointBackgroundColor: d.perTradePnl.map(function(p) { return p >= 0 ? '#3FD0C9' : '#E5484D'; }),
       }]
     },
     options: {
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) { return 'Cumulative: ' + ctx.parsed.y.toFixed(2); } } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
+        var tradePnl = d.perTradePnl[ctx.dataIndex];
+        return ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
+      } } } },
       scales: {
         x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: gridColor } },
         y: { grid: { color: gridColor } }
