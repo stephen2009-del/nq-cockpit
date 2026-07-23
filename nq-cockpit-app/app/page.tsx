@@ -14,6 +14,7 @@ type Trade = {
   session: string;
   entry: number | null;
   exit: number | null;
+  entryDate: string | null; // separate from `date` (exit time for synced trades) — null if unknown (manual entries, pre-existing synced trades)
   size: number | null;
   pnl: number;
   setup: string | null;
@@ -2117,6 +2118,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
         plannedStop: null,
         plannedTarget: null,
         date: t.exitTime,
+        entryDate: t.entryTime,
       }),
     }).then((r) => r.json());
     onTradeSynced(trade);
@@ -2771,6 +2773,20 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
   );
 }
 
+// Only computable when entryDate is actually known (real synced Tradovate
+// fills going forward) — returns null rather than guessing for manual
+// entries or trades synced before entryDate existed.
+function holdTimeLabel(t: Trade): string | null {
+  if (!t.entryDate) return null;
+  const ms = new Date(t.date).getTime() - new Date(t.entryDate).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
 function groupTradesByDay(trades: Trade[]) {
   const map = new Map<string, Trade[]>();
   trades.forEach((t) => {
@@ -2799,7 +2815,7 @@ function groupTradesByDay(trades: Trade[]) {
 }
 
 function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
-  const doc = new jsPDF();
+  const doc = new jsPDF({ orientation: "landscape" });
   let y = 20;
   doc.setFont("courier", "bold");
   doc.setFontSize(16);
@@ -2817,28 +2833,37 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
   doc.text(`Clean/Flagged${day.unrated ? "/Unrated" : ""}: ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}`, 160, y);
   y += 10;
 
+  const cols = [
+    { label: "Time", x: 14 },
+    { label: "Account", x: 40 },
+    { label: "Dir", x: 65 },
+    { label: "Entry", x: 85 },
+    { label: "Exit", x: 110 },
+    { label: "Hold", x: 135 },
+    { label: "P&L", x: 160 },
+    { label: "Discipline", x: 190 },
+    { label: "Emotion", x: 225 },
+  ];
   doc.setFont("courier", "bold");
-  doc.text("Time", 14, y);
-  doc.text("Dir", 45, y);
-  doc.text("Setup", 65, y);
-  doc.text("P&L", 110, y);
-  doc.text("Discipline", 140, y);
-  doc.text("Emotion", 170, y);
+  cols.forEach((c) => doc.text(c.label, c.x, y));
   y += 6;
   doc.setFont("courier", "normal");
 
   day.trades.forEach((t) => {
-    if (y > 280) {
+    if (y > 195) {
       doc.addPage();
       y = 20;
     }
     const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    doc.text(time, 14, y);
-    doc.text(t.dir.toUpperCase(), 45, y);
-    doc.text((t.setup || "-").slice(0, 20), 65, y);
-    doc.text(fmtMoney(t.pnl), 110, y);
-    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
-    doc.text((t.emotion || "-").slice(0, 18), 170, y);
+    doc.text(time, cols[0].x, y);
+    doc.text(t.source.toUpperCase(), cols[1].x, y);
+    doc.text(t.dir.toUpperCase(), cols[2].x, y);
+    doc.text(t.entry !== null ? String(t.entry) : "-", cols[3].x, y);
+    doc.text(t.exit !== null ? String(t.exit) : "-", cols[4].x, y);
+    doc.text(holdTimeLabel(t) ?? "-", cols[5].x, y);
+    doc.text(fmtMoney(t.pnl), cols[6].x, y);
+    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[7].x, y);
+    doc.text((t.emotion || "-").slice(0, 14), cols[8].x, y);
     y += 6;
   });
 
@@ -2847,18 +2872,28 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
 
 function ReportsTab({ trades }: { trades: Trade[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const days = groupTradesByDay(trades);
-
-  if (days.length === 0) {
-    return <div className="panel-box"><div className="empty-state"><div className="big">🗒️</div>No trades logged yet — daily reports will appear here once you start.</div></div>;
-  }
+  const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">("all");
+  const filteredTrades = envFilter === "all" ? trades : trades.filter((t) => t.source === envFilter);
+  const days = groupTradesByDay(filteredTrades);
 
   return (
     <div className="panel-box">
-      <div className="panel-title">Daily Reports</div>
-      <div className="panel-desc">Same numbers as your daily email, browsable here — plus a PDF download for any day.</div>
-      {days.map((day) => (
-        <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div className="panel-title" style={{ marginBottom: 2 }}>Daily Reports</div>
+          <div className="panel-desc" style={{ marginBottom: 0 }}>Same numbers as your daily email, browsable here — plus a PDF download for any day.</div>
+        </div>
+        <select value={envFilter} onChange={(e) => setEnvFilter(e.target.value as "all" | "live" | "demo")}>
+          <option value="all">All accounts</option>
+          <option value="live">Live only</option>
+          <option value="demo">Demo only</option>
+        </select>
+      </div>
+      {days.length === 0 ? (
+        <div className="empty-state" style={{ marginTop: 12 }}><div className="big">🗒️</div>No trades logged for this filter yet.</div>
+      ) : (
+        days.map((day) => (
+        <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
             style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", cursor: "pointer", background: "var(--panel-2)" }}
             onClick={() => setExpanded(expanded === day.dateStr ? null : day.dateStr)}
@@ -2873,13 +2908,16 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
               <table>
-                <thead><tr><th>Time</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+                <thead><tr><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
                 <tbody>
                   {day.trades.map((t) => (
                     <tr key={t.id}>
                       <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                      <td><span className={`tag ${t.source === "live" ? "flag" : t.source === "demo" ? "clean" : "na"}`}>{t.source.toUpperCase()}</span></td>
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
-                      <td>{t.setup || "—"}</td>
+                      <td>{t.entry ?? "—"}</td>
+                      <td>{t.exit ?? "—"}</td>
+                      <td>{holdTimeLabel(t) ?? "—"}</td>
                       <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
                       <td><span className={`tag ${t.disciplined === null ? "na" : t.disciplined ? "clean" : "flag"}`}>{t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                       <td>{t.emotion}</td>
@@ -2890,7 +2928,8 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
             </div>
           )}
         </div>
-      ))}
+        ))
+      )}
     </div>
   );
 }

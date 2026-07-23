@@ -22,6 +22,10 @@ model Trade {
   session           String
   entry             Float?
   exit              Float?
+  // Separate from `date` (which is exit time for synced trades) — lets
+  // hold time actually be computed. Null for manual entries and anything
+  // synced before this field existed.
+  entryDate         DateTime?
   size              Float?
   pnl               Float
   setup             String?

@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 
+// Same logic as holdTimeLabel in app/page.tsx — duplicated here since this
+// route can't import from a "use client" component.
+function holdTimeLabel(entryDate: Date | null, exitDate: Date): string | null {
+  if (!entryDate) return null;
+  const ms = exitDate.getTime() - entryDate.getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
   if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {
@@ -35,8 +48,11 @@ export async function GET(req: NextRequest) {
       (t) => `
     <tr>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.source.toUpperCase()}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.dir.toUpperCase()}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.setup || "-"}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.entry !== null ? t.entry : "-"}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.exit !== null ? t.exit : "-"}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${holdTimeLabel(t.entryDate, t.date) ?? "-"}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${t.pnl >= 0 ? "$" : "-$"}${Math.abs(t.pnl).toFixed(2)}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</td>
     </tr>`
@@ -58,8 +74,11 @@ export async function GET(req: NextRequest) {
           ? `<table style="border-collapse:collapse;width:100%;font-size:13px;">
               <thead><tr>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Time</th>
+                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Account</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Dir</th>
-                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Setup</th>
+                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Entry</th>
+                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Exit</th>
+                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Hold</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">P&amp;L</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Discipline</th>
               </tr></thead>
