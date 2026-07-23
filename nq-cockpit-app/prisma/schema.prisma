@@ -137,3 +137,12 @@ model SchwabToken {
   refreshExpiresAt DateTime
   updatedAt    DateTime @updatedAt
 }
+
+// Chart screenshots (e.g. from Thinkorswim) uploaded during the day as a
+// reminder of good/bad trades. Grouped into reports by date.
+model ChartSnapshot {
+  id        Int      @id @default(autoincrement())
+  date      DateTime @default(now())
+  note      String?
+  imageData String   // base64 data URI, resized/compressed client-side before upload
+}

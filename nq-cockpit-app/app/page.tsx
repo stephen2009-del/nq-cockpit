@@ -26,6 +26,12 @@ type Trade = {
   plannedStop: number | null;
   plannedTarget: number | null;
 };
+type ChartSnapshot = {
+  id: number;
+  date: string;
+  note: string | null;
+  imageData: string;
+};
 type Settings = {
   id: number;
   dailyLossLimit: number;
@@ -179,6 +185,7 @@ export default function Page() {
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
   const [oiForm, setOiForm] = useState({ strike: "", oi: "", note: "" });
   const [intradayChecks, setIntradayChecks] = useState<IntradayCheckT[]>([]);
+  const [snapshots, setSnapshots] = useState<ChartSnapshot[]>([]);
   const [emoEntries, setEmoEntries] = useState<EmotionalEntry[]>([]);
   const [emoForm, setEmoForm] = useState({ tag: "", note: "" });
   const [intradayInput, setIntradayInput] = useState("");
@@ -195,7 +202,7 @@ export default function Page() {
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6, r7, r8] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
@@ -203,6 +210,7 @@ export default function Page() {
       fetch("/api/oi-levels").then((r) => r.json()),
       fetch("/api/intraday").then((r) => r.json()),
       fetch("/api/emotional-log").then((r) => r.json()),
+      fetch("/api/snapshots").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -215,6 +223,7 @@ export default function Page() {
     setOiLevels(r5);
     setIntradayChecks(r6);
     setEmoEntries(r7);
+    setSnapshots(r8);
     const today = new Date().toDateString();
     const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
     if (todayEntry) {
@@ -387,6 +396,50 @@ export default function Page() {
     setIntradayInput("");
   }
 
+  // Resizes/compresses an uploaded image client-side before it ever reaches
+  // the server — otherwise a full-res phone screenshot (often several MB)
+  // would go straight into Postgres as base64, and that adds up fast over
+  // daily use. Caps the longest side at 1000px and re-encodes as JPEG at
+  // 80% quality, which is plenty to read a chart but a fraction of the size.
+  function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 1000;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return reject(new Error("Canvas not supported"));
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL("image/jpeg", 0.8));
+        };
+        img.onerror = reject;
+        img.src = reader.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addSnapshot(file: File, note: string) {
+    const imageData = await compressImage(file);
+    const snapshot = await fetch("/api/snapshots", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageData, note: note || null }),
+    }).then((r) => r.json());
+    setSnapshots((s) => [snapshot, ...s]);
+  }
+
+  async function deleteSnapshot(id: number) {
+    if (!confirm("Delete this snapshot?")) return;
+    await fetch(`/api/snapshots/${id}`, { method: "DELETE" });
+    setSnapshots((s) => s.filter((x) => x.id !== id));
+  }
+
   async function addOiLevel() {
     const strike = parseFloat(oiForm.strike);
     const oi = parseFloat(oiForm.oi);
@@ -493,6 +546,9 @@ export default function Page() {
           checks={intradayChecks}
           todayPrep={preMarketHistory.find((p) => new Date(p.date).toDateString() === new Date().toDateString()) || null}
           oiLevels={oiLevels}
+          snapshots={snapshots}
+          addSnapshot={addSnapshot}
+          deleteSnapshot={deleteSnapshot}
         />
       )}
 
@@ -510,7 +566,7 @@ export default function Page() {
         />
       )}
 
-      {tab === "reports" && <ReportsTab trades={trades} />}
+      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} />}
 
       {tab === "checklist" && (
         <>
@@ -1162,6 +1218,9 @@ function IntradayTab({
   checks,
   todayPrep,
   oiLevels,
+  snapshots,
+  addSnapshot,
+  deleteSnapshot,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -1169,6 +1228,9 @@ function IntradayTab({
   checks: IntradayCheckT[];
   todayPrep: PreMarketPrep | null;
   oiLevels: OILevel[];
+  snapshots: ChartSnapshot[];
+  addSnapshot: (file: File, note: string) => Promise<void>;
+  deleteSnapshot: (id: number) => Promise<void>;
 }) {
   const qqq = parseFloat(input);
   const validInput = !isNaN(qqq);
@@ -1255,7 +1317,67 @@ function IntradayTab({
           </div>
         )}
       </div>
+
+      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} />
     </>
+  );
+}
+
+function ChartSnapshotPanel({
+  snapshots,
+  addSnapshot,
+  deleteSnapshot,
+}: {
+  snapshots: ChartSnapshot[];
+  addSnapshot: (file: File, note: string) => Promise<void>;
+  deleteSnapshot: (id: number) => Promise<void>;
+}) {
+  const [note, setNote] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const todayStr = new Date().toDateString();
+  const todaysSnapshots = snapshots.filter((s) => new Date(s.date).toDateString() === todayStr);
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await addSnapshot(file, note);
+      setNote("");
+    } catch (err: any) {
+      alert("Upload failed: " + (err.message || String(err)));
+    }
+    setUploading(false);
+    e.target.value = "";
+  }
+
+  return (
+    <div className="panel-box">
+      <div className="panel-title">Chart Snapshots</div>
+      <div className="panel-desc">Upload a chart screenshot (e.g. from Thinkorswim) any time during the day as a reminder of a good or bad trade — shown in your daily reports.</div>
+      <div className="grid2">
+        <div className="field">
+          <label>Note (optional)</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Good — respected the trend, didn't chase" />
+        </div>
+        <div className="field">
+          <label>Image</label>
+          <input type="file" accept="image/*" onChange={handleFile} disabled={uploading} />
+        </div>
+      </div>
+      {uploading && <div className="card-sub">Uploading…</div>}
+      {todaysSnapshots.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
+          {todaysSnapshots.map((s) => (
+            <div key={s.id} style={{ width: 220 }}>
+              <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+              <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{s.note ? ` — ${s.note}` : ""}</div>
+              <button className="btn small ghost" style={{ marginTop: 4 }} onClick={() => deleteSnapshot(s.id)}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2959,7 +3081,7 @@ function groupTradesByDay(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
-async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number]): Promise<string> {
+async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = []): Promise<string> {
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   const rows = day.trades
@@ -3017,10 +3139,19 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     <thead><tr><th></th><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
+  ${daySnapshots.length > 0 ? `
+  <h2>Chart Snapshots</h2>
+  <div style="display:flex;flex-wrap:wrap;gap:16px;">
+    ${daySnapshots.map((s) => `
+    <div style="width:320px;">
+      <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
+      <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` \u2014 ${s.note}` : ""}</div>
+    </div>`).join("")}
+  </div>` : ""}
 </body></html>`;
 }
 
-function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
+async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = []) {
   const doc = new jsPDF({ orientation: "landscape" });
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
@@ -3090,10 +3221,46 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
     y += 6;
   });
 
+  if (daySnapshots.length > 0) {
+    doc.addPage();
+    y = 20;
+    doc.setFont("courier", "bold");
+    doc.setFontSize(14);
+    doc.text("Chart Snapshots", 14, y);
+    y += 10;
+    doc.setFont("courier", "normal");
+    doc.setFontSize(10);
+
+    const maxWidth = 260; // landscape page is ~297mm wide, leaving margins
+    const maxHeight = 140;
+    for (const s of daySnapshots) {
+      // Reads the image's real dimensions so it's embedded at the correct
+      // aspect ratio (contain-fit within a max box) instead of stretched.
+      const dims = await new Promise<{ w: number; h: number }>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve({ w: maxWidth, h: maxHeight });
+        img.src = s.imageData;
+      });
+      const scale = Math.min(maxWidth / dims.w, maxHeight / dims.h);
+      const w = dims.w * scale;
+      const h = dims.h * scale;
+      if (y + h + 12 > 200) {
+        doc.addPage();
+        y = 20;
+      }
+      const label = `${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? " \u2014 " + s.note : ""}`;
+      doc.text(label, 14, y);
+      y += 6;
+      doc.addImage(s.imageData, "JPEG", 14, y, w, h);
+      y += h + 12;
+    }
+  }
+
   doc.save(`nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
-function ReportsTab({ trades }: { trades: Trade[] }) {
+function ReportsTab({ trades, snapshots }: { trades: Trade[]; snapshots: ChartSnapshot[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">("all");
   const filteredTrades = envFilter === "all" ? trades : trades.filter((t) => t.source === envFilter);
@@ -3118,6 +3285,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
         days.map((day) => {
         const addedToLoser = findAddedToLoserInstances(day.trades);
         const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+        const daySnapshots = snapshots.filter((s) => new Date(s.date).toDateString() === day.dateStr);
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
@@ -3137,7 +3305,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
               onClick={(e) => {
                 e.stopPropagation();
                 const win = window.open("", "_blank");
-                buildDayReportHtml(day).then((html) => {
+                buildDayReportHtml(day, daySnapshots).then((html) => {
                   if (!win) return;
                   const blob = new Blob([html], { type: "text/html" });
                   win.location.href = URL.createObjectURL(blob);
@@ -3150,7 +3318,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
               className="btn small ghost"
               onClick={(e) => {
                 e.stopPropagation();
-                buildDayReportHtml(day).then((html) => {
+                buildDayReportHtml(day, daySnapshots).then((html) => {
                   const blob = new Blob([html], { type: "text/html" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
@@ -3165,7 +3333,7 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
             >
               Download HTML
             </button>
-            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
@@ -3200,6 +3368,19 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
                   ))}
                 </tbody>
               </table>
+              {daySnapshots.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div className="card-label">Chart Snapshots</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 6 }}>
+                    {daySnapshots.map((s) => (
+                      <div key={s.id} style={{ width: 200 }}>
+                        <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+                        <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{s.note ? ` — ${s.note}` : ""}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

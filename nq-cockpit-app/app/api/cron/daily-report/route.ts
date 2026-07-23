@@ -36,6 +36,13 @@ export async function GET(req: NextRequest) {
     orderBy: { date: "asc" },
   });
 
+  // Best-effort: not every email client renders embedded base64 images
+  // (data URIs), but most modern ones (Gmail, Apple Mail) do.
+  const snapshots = await prisma.chartSnapshot.findMany({
+    where: { date: { gte: startOfDay, lt: endOfDay } },
+    orderBy: { date: "asc" },
+  });
+
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
   const wins = trades.filter((t) => t.pnl > 0).length;
   const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0;
@@ -85,6 +92,18 @@ export async function GET(req: NextRequest) {
               <tbody>${rows}</tbody>
             </table>`
           : `<p style="color:#7F8CA6;">No trades logged today.</p>`
+      }
+      ${
+        snapshots.length
+          ? `<h3 style="color:#3FD0C9;font-size:15px;margin:20px 0 8px;">Chart Snapshots</h3>
+             <div style="display:flex;flex-wrap:wrap;gap:12px;">
+               ${snapshots.map((s) => `
+               <div style="width:280px;">
+                 <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
+                 <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` — ${s.note}` : ""}</div>
+               </div>`).join("")}
+             </div>`
+          : ""
       }
     </div>
   `;
