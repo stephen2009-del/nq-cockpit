@@ -1915,8 +1915,10 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
 type AddedToLoserMatchedInstance = { earlier: MatchedTrade; later: MatchedTrade };
 function findAddedToLoserInstancesMatched(matchedTrades: MatchedTrade[]): AddedToLoserMatchedInstance[] {
   const results: AddedToLoserMatchedInstance[] = [];
-  for (const earlier of matchedTrades) {
-    for (const later of matchedTrades) {
+  for (const later of matchedTrades) {
+    let best: MatchedTrade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of matchedTrades) {
       if (earlier === later) continue;
       if (earlier.symbol !== later.symbol || earlier.side !== later.side) continue;
       const earlierEntry = new Date(earlier.entryTime).getTime();
@@ -1924,8 +1926,13 @@ function findAddedToLoserInstancesMatched(matchedTrades: MatchedTrade[]): AddedT
       const laterEntry = new Date(later.entryTime).getTime();
       if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
       const adverse = earlier.side === "long" ? later.entryPrice < earlier.entryPrice : later.entryPrice > earlier.entryPrice;
-      if (adverse) results.push({ earlier, later });
+      if (!adverse) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
     }
+    if (best) results.push({ earlier: best, later });
   }
   return results;
 }
@@ -2887,8 +2894,14 @@ type AddedToLoserInstance = { earlier: Trade; later: Trade };
 function findAddedToLoserInstances(trades: Trade[]): AddedToLoserInstance[] {
   const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
   const results: AddedToLoserInstance[] = [];
-  for (const earlier of withEntry) {
-    for (const later of withEntry) {
+  for (const later of withEntry) {
+    // Picks only the single most recent qualifying prior position, rather
+    // than every earlier position this trade happened to overlap with —
+    // otherwise a chain of 5 sequential adds reports as 10 combinatorial
+    // pairs instead of the 4 actual add-on decisions that happened.
+    let best: Trade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of withEntry) {
       if (earlier.id === later.id) continue;
       if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
       const earlierEntry = new Date(earlier.entryDate!).getTime();
@@ -2897,8 +2910,13 @@ function findAddedToLoserInstances(trades: Trade[]): AddedToLoserInstance[] {
       // "later" must have entered while "earlier" was still open.
       if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
       const adverse = earlier.dir === "long" ? later.entry! < earlier.entry! : later.entry! > earlier.entry!;
-      if (adverse) results.push({ earlier, later });
+      if (!adverse) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
     }
+    if (best) results.push({ earlier: best, later });
   }
   return results;
 }
