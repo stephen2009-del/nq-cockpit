@@ -482,7 +482,7 @@ export default function Page() {
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
 
       {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
-      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} />}
+      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} onTradeUpdated={(t) => setTrades((prev) => prev.map((p) => (p.id === t.id ? t : p)))} />}
       {tab === "emojournal" && <EmotionalJournalTab form={emoForm} setForm={setEmoForm} onSave={addEmoEntry} entries={emoEntries} />}
 
       {tab === "intraday" && (
@@ -2111,7 +2111,7 @@ function findSyncedTrade(mt: MatchedTrade, trades: Trade[]): Trade | undefined {
   });
 }
 
-function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Settings; trades: Trade[]; onTradeSynced: (t: Trade) => void }) {
+function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { settings: Settings; trades: Trade[]; onTradeSynced: (t: Trade) => void; onTradeUpdated: (t: Trade) => void }) {
   const [accountId, setAccountId] = useState("");
   const [accounts, setAccounts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2198,6 +2198,40 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
     setTimeout(() => setSyncMsg(null), 4000);
   }
 
+  // Backfills entryDate on existing Journal trades that were synced before
+  // that field existed. Matches each pulled Tradovate fill against an
+  // existing Journal entry using the exact same criteria as
+  // findSyncedTrade (symbol/side/entry/exit price + exit time within a
+  // minute) — only updates trades that are a confident match and currently
+  // missing entryDate; never touches anything else.
+  async function backfillEntryDates() {
+    const candidates = matchedTrades
+      .map((mt) => ({ mt, existing: findSyncedTrade(mt, trades) }))
+      .filter((x): x is { mt: MatchedTrade; existing: Trade } => !!x.existing && x.existing.entryDate === null);
+    if (candidates.length === 0) {
+      setSyncMsg("No trades needed backfilling \u2014 either already have entry times, or aren't matched to a pulled fill.");
+      setTimeout(() => setSyncMsg(null), 4000);
+      return;
+    }
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      for (const { mt, existing } of candidates) {
+        const updated = await fetch(`/api/trades/${existing.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entryDate: mt.entryTime }),
+        }).then((r) => r.json());
+        onTradeUpdated(updated);
+      }
+      setSyncMsg(`\u2713 Backfilled entry times on ${candidates.length} trade${candidates.length === 1 ? "" : "s"}.`);
+    } catch (err: any) {
+      setSyncMsg(`\u26a0 Backfill failed: ${err.message || String(err)}`);
+    }
+    setSyncing(false);
+    setTimeout(() => setSyncMsg(null), 4000);
+  }
+
   const chart = matchedTrades.length > 1 ? equityCurvePoints(matchedTrades, 900, 180, 10) : null;
 
   return (
@@ -2235,6 +2269,14 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
                   title={matchedTrades.length === 0 ? "No closed trades to sync yet" : unsyncedTrades.length === 0 ? "All closed trades are already in the Journal" : undefined}
                 >
                   {syncing ? "Syncing…" : unsyncedTrades.length === 0 && matchedTrades.length > 0 ? "All Synced" : `Sync to Journal${unsyncedTrades.length ? ` (${unsyncedTrades.length})` : ""}`}
+                </button>
+                <button
+                  className="btn small ghost"
+                  onClick={backfillEntryDates}
+                  disabled={syncing || matchedTrades.length === 0}
+                  title="Fills in missing entry times on already-synced Journal trades, matched against pulled Tradovate fills — needed for Hold Time and the 'added to a losing position' detection to work on older trades."
+                >
+                  {syncing ? "Working…" : "Backfill Entry Times"}
                 </button>
                 <button
                   className="btn small ghost"
