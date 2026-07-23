@@ -1908,6 +1908,28 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
 </script>`;
 }
 
+// Same logic as findAddedToLoserInstances, but for MatchedTrade (TV
+// Analytics' Tradovate FIFO data) instead of Journal Trade records. This
+// data always has real entry/exit times, so detection works on every trade
+// here — no entryDate-missing gap like the Journal has for older entries.
+type AddedToLoserMatchedInstance = { earlier: MatchedTrade; later: MatchedTrade };
+function findAddedToLoserInstancesMatched(matchedTrades: MatchedTrade[]): AddedToLoserMatchedInstance[] {
+  const results: AddedToLoserMatchedInstance[] = [];
+  for (const earlier of matchedTrades) {
+    for (const later of matchedTrades) {
+      if (earlier === later) continue;
+      if (earlier.symbol !== later.symbol || earlier.side !== later.side) continue;
+      const earlierEntry = new Date(earlier.entryTime).getTime();
+      const earlierExit = new Date(earlier.exitTime).getTime();
+      const laterEntry = new Date(later.entryTime).getTime();
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const adverse = earlier.side === "long" ? later.entryPrice < earlier.entryPrice : later.entryPrice > earlier.entryPrice;
+      if (adverse) results.push({ earlier, later });
+    }
+  }
+  return results;
+}
+
 async function buildAnalyticsHtmlReport(
   accountLabel: string,
   cashBalance: any,
@@ -1915,11 +1937,13 @@ async function buildAnalyticsHtmlReport(
   totalPnl: number,
   winRate: number
 ) {
+  const addedToLoser = findAddedToLoserInstancesMatched(matchedTrades);
+  const laterKeys = new Set(addedToLoser.map((i) => i.later.entryTime + i.later.exitTime));
   const rows = matchedTrades
     .map(
       (t) => `
-    <tr>
-      <td>${new Date(t.exitTime).toLocaleString()}</td>
+    <tr${laterKeys.has(t.entryTime + t.exitTime) ? ' style="background:rgba(229,72,77,0.15);"' : ""}>
+      <td>${laterKeys.has(t.entryTime + t.exitTime) ? "\u26a0 " : ""}${new Date(t.exitTime).toLocaleString()}</td>
       <td>${t.symbol}</td>
       <td>${t.side.toUpperCase()}</td>
       <td>${t.qty}</td>
@@ -1948,6 +1972,11 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${matchedTrades.length}</b>Closed Trades</div>
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
+${addedToLoser.length > 0 ? `
+<div style="border:1px solid #E5484D;border-radius:6px;padding:12px 14px;background:rgba(229,72,77,0.08);margin:16px 0;">
+  <div style="font-weight:bold;margin-bottom:6px;">\u26a0 Added to a losing position \u2014 ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
+  ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.side.toUpperCase()}: entered ${inst.earlier.entryPrice.toFixed(2)} at ${new Date(inst.earlier.entryTime).toLocaleString()}, then added at ${inst.later.entryPrice.toFixed(2)} at ${new Date(inst.later.entryTime).toLocaleString()} while the first was still open and underwater.</div>`).join("")}
+</div>` : ""}
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
 ${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl })))}
 <h2>Closed Trades (FIFO matched)</h2>
