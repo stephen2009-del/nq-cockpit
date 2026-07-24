@@ -1567,7 +1567,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       setLastKnownPrice(latestCheck?.nqPrice ?? todayPrep?.nqPrice ?? null);
       setLastKnownPriceAt(latestCheck?.date ?? todayPrep?.date ?? null);
     });
-  }, [settings.tradovateEnv]);
+  }, [settings.tradovateEnv, settings.liveAccountId, settings.demoAccountId]);
 
   useEffect(() => {
     setResolvedSymbol(null);
@@ -2281,7 +2281,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
           setAccountId(String(d.accounts[0].id));
         }
       });
-  }, [settings.tradovateEnv]);
+  }, [settings.tradovateEnv, settings.liveAccountId, settings.demoAccountId]);
 
   async function sync() {
     if (!accountId) {
