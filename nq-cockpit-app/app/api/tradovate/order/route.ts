@@ -5,7 +5,7 @@ import { getTradingWindowStatus, etTimeTodayToUtc, tradingDayStart } from "@/lib
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
-import { getFreshIntradayPrice, FRESHNESS_MINUTES } from "@/lib/lastKnownPrice";
+import { getFreshIntradayPrice, FRESHNESS_MINUTES, getLastKnownNqPrice } from "@/lib/lastKnownPrice";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -29,6 +29,34 @@ export async function POST(req: NextRequest) {
   let settings = await prisma.settings.findUnique({ where: { id: 1 } });
   if (!settings) {
     settings = await prisma.settings.create({ data: { id: 1 } });
+  }
+
+  // GUARD — fat-finger limit price sanity check (server-side backstop).
+  // The Trade Ticket UI already asks for confirmation past a 3% deviation;
+  // this is a hard block for a much larger deviation (25%+, e.g. a typo'd
+  // extra digit) in case that client-side confirm was ever bypassed. Not a
+  // risk-management guard like the ones below — a resting limit far from
+  // market can be entirely intentional, which is exactly why the threshold
+  // here is deliberately wide (only egregious, near-certainly-a-typo cases
+  // get blocked outright) rather than matching the UI's 3% warning level.
+  if (orderType === "Limit" && price) {
+    const enteredPrice = parseFloat(price);
+    const lastKnown = await getLastKnownNqPrice();
+    if (Number.isFinite(enteredPrice) && enteredPrice > 0 && lastKnown !== null) {
+      const pctOff = Math.abs(enteredPrice - lastKnown) / lastKnown;
+      if (pctOff > 0.25) {
+        const reason = `Limit price ${enteredPrice} is ${(pctOff * 100).toFixed(0)}% away from the last known price (${lastKnown}) \u2014 blocked as a likely data-entry error (extra/missing digit). Double-check the price and resubmit if it's really intended.`;
+        await prisma.tradovateOrderLog.create({
+          data: {
+            env, symbol, side: action, qty: parseInt(orderQty), orderType,
+            limitPrice: parseFloat(price),
+            status: "BLOCKED",
+            blockedReason: reason,
+          },
+        });
+        return NextResponse.json({ blocked: true, reason }, { status: 403 });
+      }
+    }
   }
 
   // GUARD 0 — active manual/auto lockout. Checked before anything else.

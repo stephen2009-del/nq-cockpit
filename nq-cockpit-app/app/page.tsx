@@ -1650,6 +1650,29 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       alert("Stop Loss and Target must both be filled in together, or both left blank.");
       return;
     }
+    // FAT-FINGER CHECK — catches a typo'd extra digit (or a dropped one)
+    // before it goes anywhere near Tradovate. This isn't a risk-management
+    // guard like the ones below (a limit resting well away from market can
+    // be entirely intentional) — it's specifically a "does this number look
+    // like what you meant to type" sanity check, so it's a client-side
+    // confirm rather than a hard server-side block. Uses whatever last
+    // known price we have, even a stale one — a typo this size (10x, an
+    // extra zero, etc.) shows up against an hours-old reference just as
+    // clearly as a fresh one.
+    if (form.orderType === "Limit" && form.price && lastKnownPrice !== null) {
+      const enteredPrice = parseFloat(form.price);
+      if (Number.isFinite(enteredPrice) && enteredPrice > 0) {
+        const pctOff = Math.abs(enteredPrice - lastKnownPrice) / lastKnownPrice;
+        if (pctOff > 0.03) {
+          const proceed = window.confirm(
+            `\u26a0 Limit price ${enteredPrice} is ${(pctOff * 100).toFixed(0)}% away from the last known price (${roundToTick(lastKnownPrice).toFixed(2)}).\n\n` +
+            `This often means an extra or missing digit got typed in by mistake.\n\n` +
+            `Click OK only if ${enteredPrice} is really the price you meant to enter.`
+          );
+          if (!proceed) return;
+        }
+      }
+    }
     setSubmitting(true);
     setResult(null);
     try {
