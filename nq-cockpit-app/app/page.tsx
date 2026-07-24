@@ -3368,13 +3368,13 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
 
   if (addedToLoser.length > 0) {
     doc.setTextColor(229, 72, 77);
-    doc.text(`\u26a0 Added to a losing position \u00d7 ${addedToLoser.length} (marked with \u26a0 below)`, 14, y);
+    doc.text(`! Added to a losing position \u00d7 ${addedToLoser.length} (marked with ! below)`, 14, y);
     doc.setTextColor(0, 0, 0);
     y += 8;
   }
   if (addedToWinner.length > 0) {
     doc.setTextColor(63, 208, 201);
-    doc.text(`\u2605 Added to a winning position \u00d7 ${addedToWinner.length} (marked with \u2605 below)`, 14, y);
+    doc.text(`+ Added to a winning position \u00d7 ${addedToWinner.length} (marked with + below)`, 14, y);
     doc.setTextColor(0, 0, 0);
     y += 8;
   }
