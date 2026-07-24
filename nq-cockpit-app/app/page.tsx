@@ -442,6 +442,14 @@ export default function Page() {
     setSnapshots((s) => s.filter((x) => x.id !== id));
   }
 
+  async function updateSnapshotNote(id: number, note: string) {
+    const updated = await fetch(`/api/snapshots/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note || null }),
+    }).then((r) => r.json());
+    setSnapshots((s) => s.map((x) => (x.id === id ? updated : x)));
+  }
+
   async function addOiLevel() {
     const strike = parseFloat(oiForm.strike);
     const oi = parseFloat(oiForm.oi);
@@ -551,6 +559,7 @@ export default function Page() {
           snapshots={snapshots}
           addSnapshot={addSnapshot}
           deleteSnapshot={deleteSnapshot}
+          updateSnapshotNote={updateSnapshotNote}
         />
       )}
 
@@ -1223,6 +1232,7 @@ function IntradayTab({
   snapshots,
   addSnapshot,
   deleteSnapshot,
+  updateSnapshotNote,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -1233,6 +1243,7 @@ function IntradayTab({
   snapshots: ChartSnapshot[];
   addSnapshot: (file: File, note: string) => Promise<void>;
   deleteSnapshot: (id: number) => Promise<void>;
+  updateSnapshotNote: (id: number, note: string) => Promise<void>;
 }) {
   const qqq = parseFloat(input);
   const validInput = !isNaN(qqq);
@@ -1298,7 +1309,7 @@ function IntradayTab({
         <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
 
-      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} />
+      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} updateSnapshotNote={updateSnapshotNote} />
 
       <div className="panel-box">
         <div className="panel-title">Today's Checks</div>
@@ -1329,13 +1340,17 @@ function ChartSnapshotPanel({
   snapshots,
   addSnapshot,
   deleteSnapshot,
+  updateSnapshotNote,
 }: {
   snapshots: ChartSnapshot[];
   addSnapshot: (file: File, note: string) => Promise<void>;
   deleteSnapshot: (id: number) => Promise<void>;
+  updateSnapshotNote: (id: number, note: string) => Promise<void>;
 }) {
   const [note, setNote] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingNote, setEditingNote] = useState("");
   const todayStr = tradingDayKey(new Date());
   const todaysSnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === todayStr);
 
@@ -1356,7 +1371,7 @@ function ChartSnapshotPanel({
   return (
     <div className="panel-box">
       <div className="panel-title">Chart Snapshots</div>
-      <div className="panel-desc">Upload a chart screenshot (e.g. from Thinkorswim) any time during the day as a reminder of a good or bad trade — shown in your daily reports.</div>
+      <div className="panel-desc">Upload a chart screenshot (e.g. from Thinkorswim) any time during the day as a reminder of a good or bad trade — shown in your daily reports. Note field is optional here and can also be added/edited on any snapshot afterward, in case you picked the image before typing a note.</div>
       <div className="grid2">
         <div className="field">
           <label>Note (optional)</label>
@@ -1373,8 +1388,44 @@ function ChartSnapshotPanel({
           {todaysSnapshots.map((s) => (
             <div key={s.id} style={{ width: 220 }}>
               <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
-              <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{s.note ? ` — ${s.note}` : ""}</div>
-              <button className="btn small ghost" style={{ marginTop: 4 }} onClick={() => deleteSnapshot(s.id)}>Delete</button>
+              <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+              {editingId === s.id ? (
+                <div style={{ marginTop: 4 }}>
+                  <input
+                    value={editingNote}
+                    onChange={(e) => setEditingNote(e.target.value)}
+                    placeholder="Add a note…"
+                    autoFocus
+                    style={{ marginBottom: 6 }}
+                  />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      className="btn small primary"
+                      onClick={async () => {
+                        await updateSnapshotNote(s.id, editingNote);
+                        setEditingId(null);
+                      }}
+                    >
+                      Save
+                    </button>
+                    <button className="btn small ghost" onClick={() => setEditingId(null)}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+                  <div className="card-sub" style={{ flex: 1 }}>{s.note || <em>No note</em>}</div>
+                  <button
+                    className="btn small ghost"
+                    onClick={() => {
+                      setEditingId(s.id);
+                      setEditingNote(s.note || "");
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
+              <button className="btn small ghost" style={{ marginTop: 6 }} onClick={() => deleteSnapshot(s.id)}>Delete</button>
             </div>
           ))}
         </div>
