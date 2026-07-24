@@ -1535,7 +1535,16 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     setWindowStatus(computeWindowStatus());
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
       .then((r) => r.json())
-      .then((d) => setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error }))
+      .then((d) => {
+        setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error });
+        // Only one account ever shows up per environment in practice — no
+        // reason to make you pick it manually every time you're already
+        // choosing the environment in Settings. Still overridable via the
+        // dropdown if a second account ever appears.
+        if (d.accounts?.length === 1) {
+          setForm((f) => ({ ...f, accountId: String(d.accounts[0].id) }));
+        }
+      })
       .catch((e) => setConnStatus({ connected: false, accounts: null, error: String(e) }));
     fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
 
