@@ -498,7 +498,7 @@ export default function Page() {
 
       <div className="strip">
         <div className="gauge-card">
-          <div className="card-label">Discipline Gauge ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
+          <div className="card-label">Discipline Gauge — All-Time ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className="dial-wrap">
             <Dial score={disciplineScore} color={scoreColor} />
             <div>
@@ -513,12 +513,12 @@ export default function Page() {
           <div className="card-sub">{todaysTrades.length} trade(s) today</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Discipline Streak ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
+          <div className="card-label">Discipline Streak — All-Time ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${streak > 0 ? "pos" : ""}`}>{streak}</div>
           <div className="card-sub">consecutive clean trades</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Daily Loss Limit ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
+          <div className="card-label">Daily Loss Limit — Today ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${lossPct >= 100 ? "neg" : lossPct >= 70 ? "warn" : ""}`}>{fmtMoney(-lossUsed)} / {fmtMoney(-limit)}</div>
           <div className="bar-track"><div className="bar-fill" style={{ width: `${lossPct}%`, background: lossPct >= 100 ? "var(--red)" : lossPct >= 70 ? "var(--amber)" : "var(--cyan)" }} /></div>
         </div>
