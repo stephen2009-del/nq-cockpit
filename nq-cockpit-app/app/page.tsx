@@ -2025,7 +2025,7 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
 // actually render, same as any report that embeds a hosted chart library.
 // Zoom/pan isn't included here (would mean a second CDN plugin + version
 // matching to get right) — flag if that's still wanted after seeing these.
-async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise<string> {
+async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: string | null; date?: string | null }[]): Promise<string> {
   if (items.length === 0) {
     return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
   }
@@ -2055,7 +2055,30 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
   const wins = items.filter((t) => t.pnl > 0).length;
   const losses = items.filter((t) => t.pnl <= 0).length;
 
-  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses }).replace(/</g, "\\u003c");
+  // How many positions were open at the same time as this one — counts
+  // itself, so 1 means it was never stacked with anything else. Only
+  // computable when both this trade and the one it's being compared against
+  // have a recorded entry time (real synced fills going forward, or manual
+  // entries with Entry Time filled in) — null otherwise rather than
+  // guessing. Two trades "overlap" if either one's entry happened before
+  // the other's exit, in both directions — the standard interval-overlap
+  // check, not just a same-symbol/same-direction one, since holding e.g. an
+  // NQ long and an MNQ short at once is still two concurrent positions.
+  const concurrentCounts: (number | null)[] = items.map((it) => {
+    if (!it.entryDate || !it.date) return null;
+    const entryI = new Date(it.entryDate).getTime();
+    const exitI = new Date(it.date).getTime();
+    let count = 0;
+    for (const other of items) {
+      if (!other.entryDate || !other.date) continue;
+      const entryJ = new Date(other.entryDate).getTime();
+      const exitJ = new Date(other.date).getTime();
+      if (entryI < exitJ && entryJ < exitI) count++;
+    }
+    return count;
+  });
+
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts }).replace(/</g, "\\u003c");
 
   return `
 <canvas id="equityChart" height="90"></canvas>
@@ -2090,7 +2113,10 @@ async function buildChartsHtml(items: { label: string; pnl: number }[]): Promise
     options: {
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
         var tradePnl = d.perTradePnl[ctx.dataIndex];
-        return ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
+        var concurrent = d.concurrentCounts[ctx.dataIndex];
+        var lines = ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
+        lines.push(concurrent === null ? 'Concurrent positions: unknown (no entry time)' : 'Concurrent positions: ' + concurrent);
+        return lines;
       } } } },
       scales: {
         x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: gridColor } },
@@ -2203,7 +2229,7 @@ ${addedToLoser.length > 0 ? `
   ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.side.toUpperCase()}: entered ${inst.earlier.entryPrice.toFixed(2)} at ${new Date(inst.earlier.entryTime).toLocaleString()}, then added at ${inst.later.entryPrice.toFixed(2)} at ${new Date(inst.later.entryTime).toLocaleString()} while the first was still open and underwater.</div>`).join("")}
 </div>` : ""}
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl })))}
+${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl, entryDate: t.entryTime, date: t.exitTime })))}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
@@ -3290,7 +3316,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     .join("");
 
   const chartsHtml = await buildChartsHtml(
-    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl }))
+    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl, entryDate: t.entryDate, date: t.date }))
   );
 
   return `<!DOCTYPE html>
