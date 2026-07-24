@@ -53,6 +53,11 @@ model Settings {
   openingBufferMinutes Int    @default(10)
   tradovateEnv         String @default("demo")
   tradingWindowLocked  Boolean @default(false)
+  // Pins a specific account per environment, for when more than one exists
+  // (e.g. Live has two accounts but only one is actually active). Null
+  // means "auto-select if there's only one account, otherwise ask."
+  liveAccountId        String?
+  demoAccountId        String?
 }
 
 model TradovateOrderLog {

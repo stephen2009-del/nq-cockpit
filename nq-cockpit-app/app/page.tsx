@@ -43,6 +43,8 @@ type Settings = {
   openingBufferMinutes: number;
   tradovateEnv: string;
   tradingWindowLocked: boolean;
+  liveAccountId: string | null;
+  demoAccountId: string | null;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
@@ -176,7 +178,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false,
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null,
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -1537,11 +1539,16 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       .then((r) => r.json())
       .then((d) => {
         setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error });
-        // Only one account ever shows up per environment in practice — no
-        // reason to make you pick it manually every time you're already
-        // choosing the environment in Settings. Still overridable via the
-        // dropdown if a second account ever appears.
-        if (d.accounts?.length === 1) {
+        // Prefers the account you've pinned in Settings for this
+        // environment (needed once more than one account exists — auto-
+        // selecting "the only one" doesn't work anymore). Falls back to
+        // auto-selecting if there's genuinely just one account and nothing
+        // configured, otherwise leaves it for manual selection.
+        const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
+        const preferredExists = preferredId && d.accounts?.some((a: any) => String(a.id) === String(preferredId));
+        if (preferredExists) {
+          setForm((f) => ({ ...f, accountId: String(preferredId) }));
+        } else if (d.accounts?.length === 1) {
           setForm((f) => ({ ...f, accountId: String(d.accounts[0].id) }));
         }
       })
@@ -2263,9 +2270,14 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
       .then((r) => r.json())
       .then((d) => {
         setAccounts(d.accounts || []);
-        // Only one account ever shows up per environment in practice — no
-        // reason to make you pick it manually every time.
-        if (d.accounts?.length === 1) {
+        // Prefers the account pinned in Settings for this environment,
+        // falling back to auto-select only when there's genuinely just one
+        // account and nothing configured.
+        const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
+        const preferredExists = preferredId && d.accounts?.some((a: any) => String(a.id) === String(preferredId));
+        if (preferredExists) {
+          setAccountId(String(preferredId));
+        } else if (d.accounts?.length === 1) {
           setAccountId(String(d.accounts[0].id));
         }
       });
@@ -3011,6 +3023,27 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
             <option value="demo">Demo</option>
             <option value="live">Live</option>
           </select>
+        </div>
+        <div className="grid2">
+          <div className="field">
+            <label>Preferred Live Account ID (optional)</label>
+            <input
+              value={local.liveAccountId ?? ""}
+              onChange={(e) => setLocal({ ...local, liveAccountId: e.target.value || null })}
+              placeholder="e.g. 1003033"
+            />
+          </div>
+          <div className="field">
+            <label>Preferred Demo Account ID (optional)</label>
+            <input
+              value={local.demoAccountId ?? ""}
+              onChange={(e) => setLocal({ ...local, demoAccountId: e.target.value || null })}
+              placeholder="e.g. 1234567"
+            />
+          </div>
+        </div>
+        <div className="panel-desc" style={{ marginTop: -8 }}>
+          If more than one account shows up for an environment, this one gets auto-selected on Trade Ticket and TV Analytics instead of asking you to pick every time. Leave blank if there's only ever one account — it'll auto-select on its own.
         </div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
