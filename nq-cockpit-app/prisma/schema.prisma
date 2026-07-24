@@ -73,6 +73,10 @@ model TradovateOrderLog {
   targetPrice    Float?
   status         String
   blockedReason  String?
+  addReason      String?  // why you added to an already-open same-direction position — captured
+                          // at order time via a required prompt in the Trade Ticket, specifically
+                          // to fill the gap where synced Tradovate fills otherwise carry zero
+                          // self-reported context (unlike manually-logged Journal entries).
   tradovateOrderId String?
   rawResponse    Json?
 }

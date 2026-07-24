@@ -1465,6 +1465,7 @@ type OrderLog = {
   targetPrice: number | null;
   status: string;
   blockedReason: string | null;
+  addReason: string | null;
   tradovateOrderId: string | null;
 };
 
@@ -1673,6 +1674,35 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         }
       }
     }
+    // ADD-ON REASON PROMPT — if this order would add to an already-open
+    // position in the same symbol and direction, require a one-line reason
+    // before it goes through. This exists specifically because synced
+    // Tradovate fills otherwise carry zero self-reported context (unlike
+    // manually-logged Journal entries with their checklist/emotion fields)
+    // — after the fact there's no way to know *why* an add-on cluster
+    // happened, only that it did. Uses currentPositions, which can be up
+    // to ~30s stale (refreshed on an interval, not on every keystroke) —
+    // acceptable here since this is about capturing intent at the moment
+    // of the decision, not a risk gate; the actual position-guard check
+    // is still the authoritative, fresh, server-side one, unaffected by
+    // whatever gets typed into this prompt.
+    let addReason: string | undefined;
+    const existingPosition = currentPositions.find((p) => p.symbol === resolvedSymbol.symbol && p.netPos !== 0);
+    if (existingPosition) {
+      const existingDirection = existingPosition.netPos > 0 ? "long" : "short";
+      const newDirection = form.action === "Buy" ? "long" : "short";
+      if (newDirection === existingDirection) {
+        const reason = window.prompt(
+          `You already have an open ${existingDirection} position in ${resolvedSymbol.symbol} (${Math.abs(existingPosition.netPos)} contract(s) @ ${existingPosition.netPrice}).\n\n` +
+          `This order would add to it. Why? (one line, required)`
+        );
+        if (!reason || !reason.trim()) {
+          alert("A reason is required to add to an existing open position. Order not submitted.");
+          return;
+        }
+        addReason = reason.trim();
+      }
+    }
     setSubmitting(true);
     setResult(null);
     try {
@@ -1689,6 +1719,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           price: form.orderType === "Limit" ? String(roundToTick(parseFloat(form.price))) : undefined,
           stopLoss: form.stopLoss ? String(roundToTick(parseFloat(form.stopLoss))) : undefined,
           target: form.target ? String(roundToTick(parseFloat(form.target))) : undefined,
+          addReason,
         }),
       });
       const data = await res.json();
@@ -1983,7 +2014,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table>
-              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>SL / Target</th><th>Status</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>SL / Target</th><th>Status</th><th>Detail</th><th>Add Reason</th></tr></thead>
               <tbody>
                 {logs.map((l) => (
                   <tr key={l.id}>
@@ -1996,6 +2027,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                     <td>{l.stopLossPrice && l.targetPrice ? `${l.stopLossPrice} / ${l.targetPrice}` : "—"}</td>
                     <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : l.status === "ALLOWED" ? "na" : "flag"}`}>{l.status}</span></td>
                     <td style={{ maxWidth: 260, whiteSpace: "normal" }}>{l.blockedReason || l.tradovateOrderId || "—"}</td>
+                    <td style={{ maxWidth: 220, whiteSpace: "normal" }}>{l.addReason || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3523,6 +3555,128 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
   doc.save(`nq-cockpit-report-${envLabel}-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
+function formatHourLabel(h: number): string {
+  const period = h < 12 ? "a" : "p";
+  let displayHour = h % 12;
+  if (displayHour === 0) displayHour = 12;
+  return `${displayHour}${period}`;
+}
+
+function median(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+// Pulls every day's add-on instances (loser and winner) together into one
+// cross-day view. The per-day callouts elsewhere on this tab show WHAT
+// happened on any single day — this shows whether it's a recurring habit
+// or a one-off. Only trades with entryDate populated feed into this (same
+// limitation as the per-day detectors), so days made up entirely of older
+// or manual entries without it simply won't contribute any instances.
+function AddOnPatternsPanel({ days }: { days: ReturnType<typeof groupTradesByDay> }) {
+  const loserInstances: { earlier: Trade; later: Trade }[] = [];
+  const winnerInstances: { earlier: Trade; later: Trade }[] = [];
+  const daysWithLoserAdd = new Set<string>();
+  const daysWithWinnerAdd = new Set<string>();
+
+  for (const day of days) {
+    const loser = findAddedToLoserInstances(day.trades);
+    const winner = findAddedToWinnerInstances(day.trades);
+    if (loser.length > 0) daysWithLoserAdd.add(day.dateStr);
+    if (winner.length > 0) daysWithWinnerAdd.add(day.dateStr);
+    loserInstances.push(...loser);
+    winnerInstances.push(...winner);
+  }
+
+  if (loserInstances.length === 0 && winnerInstances.length === 0) {
+    return (
+      <div className="panel-box" style={{ marginTop: 12 }}>
+        <div className="panel-title" style={{ marginBottom: 2 }}>Add-On Patterns (All Days)</div>
+        <div className="panel-desc" style={{ marginBottom: 0 }}>No adding-to-an-open-position instances detected yet across {days.length} day(s) — this needs trades with a recorded Entry Time (synced fills, or manual entries with it filled in) to work.</div>
+      </div>
+    );
+  }
+
+  const longCount = loserInstances.filter((i) => i.earlier.dir === "long").length;
+  const shortCount = loserInstances.filter((i) => i.earlier.dir === "short").length;
+
+  const gapMinutes = loserInstances
+    .filter((i) => i.earlier.entryDate && i.later.entryDate)
+    .map((i) => (new Date(i.later.entryDate!).getTime() - new Date(i.earlier.entryDate!).getTime()) / 60000);
+  const medianGap = median(gapMinutes);
+
+  // Trading-day order (6pm–6pm, matching how the rest of the app defines
+  // "today") rather than plain midnight-to-midnight, so the bars read left
+  // to right the same way a trading session actually unfolds.
+  const hourOrder = Array.from({ length: 24 }, (_, i) => (18 + i) % 24);
+  const hourCounts = new Map<number, number>();
+  for (const inst of loserInstances) {
+    if (!inst.later.entryDate) continue;
+    const h = new Date(inst.later.entryDate).getHours();
+    hourCounts.set(h, (hourCounts.get(h) || 0) + 1);
+  }
+  const maxHourCount = Math.max(1, ...Array.from(hourCounts.values()));
+
+  return (
+    <div className="panel-box" style={{ marginTop: 12 }}>
+      <div className="panel-title" style={{ marginBottom: 2 }}>Add-On Patterns (All Days)</div>
+      <div className="panel-desc" style={{ marginBottom: 10 }}>Across {days.length} day(s) in this filter — is adding to open positions a recurring habit, and when does it tend to happen?</div>
+      <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div className="card-sub">Days with a losing add</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-neg">{daysWithLoserAdd.size} / {days.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Total losing-add instances</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-neg">{loserInstances.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Days with a winning add</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-pos">{daysWithWinnerAdd.size} / {days.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Total winning-add instances</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-pos">{winnerInstances.length}</div>
+        </div>
+        {loserInstances.length > 0 && (
+          <div>
+            <div className="card-sub">Long vs. short (losing adds)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{longCount} long / {shortCount} short</div>
+          </div>
+        )}
+        {medianGap !== null && (
+          <div>
+            <div className="card-sub">Median time to add (losing)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{medianGap < 1 ? "<1m" : `${Math.round(medianGap)}m`}</div>
+          </div>
+        )}
+      </div>
+      {loserInstances.length > 0 && (
+        <>
+          <div className="card-sub" style={{ marginBottom: 6 }}>When losing adds happen (by hour, trading-day order)</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 70 }}>
+            {hourOrder.map((h) => {
+              const count = hourCounts.get(h) || 0;
+              return (
+                <div key={h} title={`${formatHourLabel(h)}: ${count}`} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                  <div style={{ width: "100%", height: `${(count / maxHourCount) * 100}%`, background: count > 0 ? "var(--red)" : "var(--line)", opacity: count > 0 ? 0.7 : 0.3, borderRadius: 2, minHeight: 2 }} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+            {hourOrder.map((h) => (
+              <div key={h} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--muted)" }}>{h % 3 === 0 ? formatHourLabel(h) : ""}</div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; settings: Settings }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">(settings.tradovateEnv === "live" ? "live" : "demo");
@@ -3550,6 +3704,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
           <option value="demo">Demo only</option>
         </select>
       </div>
+      <AddOnPatternsPanel days={days} />
       {days.length === 0 ? (
         <div className="empty-state" style={{ marginTop: 12 }}><div className="big">🗒️</div>No trades logged for this filter yet.</div>
       ) : (

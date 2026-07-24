@@ -17,7 +17,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { env, accountId, symbol, action, orderQty, orderType, price, stopLoss, target } = body;
+  const { env, accountId, symbol, action, orderQty, orderType, price, stopLoss, target, addReason } = body;
 
   if (!env || (env !== "demo" && env !== "live")) {
     return NextResponse.json({ error: "env must be 'demo' or 'live'" }, { status: 400 });
@@ -310,6 +310,7 @@ export async function POST(req: NextRequest) {
         limitPrice: price ? parseFloat(price) : null,
         stopLossPrice: hasBracket ? parseFloat(stopLoss) : null,
         targetPrice: hasBracket ? parseFloat(target) : null,
+        addReason: addReason || null,
         status: result.ok ? "SUBMITTED" : "ERROR",
         tradovateOrderId: result.ok ? String(result.body.orderId ?? "") : null,
         rawResponse: result.body,
