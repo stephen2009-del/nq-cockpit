@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
+import { tradingDayStart, tradingDayKey } from "@/lib/tradingWindow";
 
 // Same logic as holdTimeLabel in app/page.tsx — duplicated here since this
 // route can't import from a "use client" component.
@@ -27,9 +28,16 @@ export async function GET(req: NextRequest) {
   }
 
   const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfDay = new Date(startOfDay);
-  endOfDay.setDate(endOfDay.getDate() + 1);
+  // A "trading day" runs 6pm ET to 6pm ET the next day (CME Globex
+  // convention), matching tradingDayKey/tradingDayStart used everywhere
+  // else in the app. Was previously the server's raw local timezone (UTC
+  // on Railway) at midnight — same class of bug fixed in the order route.
+  const startOfDay = tradingDayStart(now);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+  // startOfDay is a 6pm-ET-the-evening-before timestamp, so its raw
+  // .toDateString() would show the wrong (prior) calendar day — derive the
+  // actual trading-day label from the key instead.
+  const tradingDayLabel = new Date(`${tradingDayKey(now)}T12:00:00`).toDateString();
 
   const trades = await prisma.trade.findMany({
     where: { date: { gte: startOfDay, lt: endOfDay } },
@@ -69,7 +77,7 @@ export async function GET(req: NextRequest) {
   const html = `
     <div style="font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;border-radius:8px;">
       <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Daily Report</h2>
-      <p style="color:#7F8CA6;margin:0 0 16px;">${startOfDay.toDateString()}</p>
+      <p style="color:#7F8CA6;margin:0 0 16px;">${tradingDayLabel}</p>
       <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;">
         <div><strong>P&amp;L:</strong> ${totalPnl >= 0 ? "$" : "-$"}${Math.abs(totalPnl).toFixed(2)}</div>
         <div><strong>Trades:</strong> ${trades.length}</div>
@@ -110,7 +118,7 @@ export async function GET(req: NextRequest) {
 
   await sendEmail({
     to,
-    subject: `NQ Cockpit — ${trades.length} trade(s), ${totalPnl >= 0 ? "+" : "-"}$${Math.abs(totalPnl).toFixed(2)} — ${startOfDay.toLocaleDateString()}`,
+    subject: `NQ Cockpit — ${trades.length} trade(s), ${totalPnl >= 0 ? "+" : "-"}$${Math.abs(totalPnl).toFixed(2)} — ${tradingDayLabel}`,
     html,
   });
 

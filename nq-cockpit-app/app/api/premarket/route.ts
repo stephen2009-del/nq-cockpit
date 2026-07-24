@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { tradingDayStart } from "@/lib/tradingWindow";
 
 export async function GET() {
   const history = await prisma.preMarketPrep.findMany({
@@ -22,7 +23,7 @@ export async function POST(req: NextRequest) {
   }
 
   const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfDay = tradingDayStart(now);
   const endOfDay = new Date(startOfDay);
   endOfDay.setDate(endOfDay.getDate() + 1);
 

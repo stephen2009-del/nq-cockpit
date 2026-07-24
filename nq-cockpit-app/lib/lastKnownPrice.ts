@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { tradingDayStart } from "@/lib/tradingWindow";
 
 const FRESHNESS_MINUTES = 10;
 
@@ -8,7 +9,7 @@ const FRESHNESS_MINUTES = 10;
 // before input validation was added, rather than propagating them further.
 export async function getLastKnownNqPrice(): Promise<number | null> {
   const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfDay = tradingDayStart(now);
 
   const checks = await prisma.intradayCheck.findMany({
     where: { date: { gte: startOfDay } },
@@ -32,7 +33,7 @@ export async function getLastKnownNqPrice(): Promise<number | null> {
 // instead of presented as if it were current.
 export async function getLastKnownNqPriceWithAge(): Promise<{ price: number; timestamp: Date; ageMinutes: number } | null> {
   const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfDay = tradingDayStart(now);
 
   const checks = await prisma.intradayCheck.findMany({
     where: { date: { gte: startOfDay } },

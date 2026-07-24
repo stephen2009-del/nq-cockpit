@@ -10,6 +10,7 @@ import {
   getOrderById,
 } from "@/lib/tradovate";
 import { sendEmail } from "@/lib/email";
+import { tradingDayStart } from "@/lib/tradingWindow";
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
@@ -50,7 +51,7 @@ export async function GET(req: NextRequest) {
           : rule.entryPrice - directPnl / perPoint;
       } else {
         const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const startOfDay = tradingDayStart(now);
         const lastCheck = await prisma.intradayCheck.findFirst({ where: { date: { gte: startOfDay } }, orderBy: { date: "desc" } });
         impliedPrice = lastCheck?.nqPrice ?? null;
       }

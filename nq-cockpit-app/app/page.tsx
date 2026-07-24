@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
-import { getTradingWindowStatus } from "@/lib/tradingWindow";
+import { getTradingWindowStatus, tradingDayKey } from "@/lib/tradingWindow";
 import { matchFillsToTrades, MatchedTrade, analyzeHoldTimes } from "@/lib/fifoMatch";
 
 type Rule = { id: number; text: string; order: number };
@@ -224,8 +224,8 @@ export default function Page() {
     setIntradayChecks(r6);
     setEmoEntries(r7);
     setSnapshots(r8);
-    const today = new Date().toDateString();
-    const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
+    const today = tradingDayKey(new Date());
+    const todayEntry = r4.find((p: PreMarketPrep) => tradingDayKey(new Date(p.date)) === today);
     if (todayEntry) {
       setPreMarketForm({
         qqqPrice: String(todayEntry.qqqPrice),
@@ -266,8 +266,8 @@ export default function Page() {
   const envFilteredTrades = trades.filter((t) => t.source === "manual" || t.source === settings.tradovateEnv);
   const ratedTrades = envFilteredTrades.filter((t) => t.disciplined !== null);
   const disciplineScore = ratedTrades.length ? Math.round((ratedTrades.filter((t) => t.disciplined).length / ratedTrades.length) * 100) : null;
-  const today = new Date().toDateString();
-  const todaysTrades = envFilteredTrades.filter((t) => new Date(t.date).toDateString() === today);
+  const today = tradingDayKey(new Date());
+  const todaysTrades = envFilteredTrades.filter((t) => tradingDayKey(new Date(t.date)) === today);
   const todaysPnl = todaysTrades.reduce((s, t) => s + t.pnl, 0);
   let streak = 0;
   for (let i = envFilteredTrades.length - 1; i >= 0; i--) {
@@ -465,9 +465,9 @@ export default function Page() {
 
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
-  const todayStr = new Date().toDateString();
-  const latestIntradayToday = [...intradayChecks].reverse().find((c) => new Date(c.date).toDateString() === todayStr);
-  const todayPrepForForm = preMarketHistory.find((p) => new Date(p.date).toDateString() === todayStr);
+  const todayStr = tradingDayKey(new Date());
+  const latestIntradayToday = [...intradayChecks].reverse().find((c) => tradingDayKey(new Date(c.date)) === todayStr);
+  const todayPrepForForm = preMarketHistory.find((p) => tradingDayKey(new Date(p.date)) === todayStr);
   const journalLastKnownPrice = latestIntradayToday?.nqPrice ?? todayPrepForForm?.nqPrice ?? null;
 
   const RISK_TAGS = ["FOMO", "Tilted / Revenge", "Overconfident", "Doubt"];
@@ -544,7 +544,7 @@ export default function Page() {
           setInput={setIntradayInput}
           onCheck={addIntradayCheck}
           checks={intradayChecks}
-          todayPrep={preMarketHistory.find((p) => new Date(p.date).toDateString() === new Date().toDateString()) || null}
+          todayPrep={preMarketHistory.find((p) => tradingDayKey(new Date(p.date)) === tradingDayKey(new Date())) || null}
           oiLevels={oiLevels}
           snapshots={snapshots}
           addSnapshot={addSnapshot}
@@ -1014,7 +1014,7 @@ function buildObservations(
     }
   }
 
-  const todayLevels = oiLevels.filter((l) => new Date(l.date).toDateString() === new Date().toDateString());
+  const todayLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
   todayLevels.forEach((level) => {
     const distance = Math.abs(currentQqq - level.strike);
     if (distance <= 2) {
@@ -1334,8 +1334,8 @@ function ChartSnapshotPanel({
 }) {
   const [note, setNote] = useState("");
   const [uploading, setUploading] = useState(false);
-  const todayStr = new Date().toDateString();
-  const todaysSnapshots = snapshots.filter((s) => new Date(s.date).toDateString() === todayStr);
+  const todayStr = tradingDayKey(new Date());
+  const todaysSnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === todayStr);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -1547,7 +1547,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       fetch("/api/premarket").then((r) => r.json()),
     ]).then(([checks, prep]) => {
       const latestCheck = checks[checks.length - 1];
-      const todayPrep = prep.find((p: PreMarketPrep) => new Date(p.date).toDateString() === new Date().toDateString());
+      const todayPrep = prep.find((p: PreMarketPrep) => tradingDayKey(new Date(p.date)) === tradingDayKey(new Date()));
       setLastKnownPrice(latestCheck?.nqPrice ?? todayPrep?.nqPrice ?? null);
       setLastKnownPriceAt(latestCheck?.date ?? todayPrep?.date ?? null);
     });
@@ -2565,8 +2565,8 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   // reconcile against the top bar's "Today's P&L" — the whole reason this
   // panel exists is to answer "does today's P&L mix Demo and Live," so it
   // needs to use the same "today" scope as that card, not every trade ever.
-  const todayStr = new Date().toDateString();
-  const todaysAllTrades = trades.filter((t) => new Date(t.date).toDateString() === todayStr);
+  const todayStr = tradingDayKey(new Date());
+  const todaysAllTrades = trades.filter((t) => tradingDayKey(new Date(t.date)) === todayStr);
   const envBuckets: { label: string; trades: Trade[] }[] = [
     { label: "Live", trades: todaysAllTrades.filter((t) => t.source === "live") },
     { label: "Demo", trades: todaysAllTrades.filter((t) => t.source === "demo") },
@@ -2757,7 +2757,7 @@ function EmotionalPatternsPanel({ trades, emoEntries }: { trades: Trade[]; emoEn
 
   const entryDays = new Map<string, EmotionalEntry[]>();
   emoEntries.forEach((e) => {
-    const key = new Date(e.date).toDateString();
+    const key = tradingDayKey(new Date(e.date));
     if (!entryDays.has(key)) entryDays.set(key, []);
     entryDays.get(key)!.push(e);
   });
@@ -3057,7 +3057,7 @@ function holdTimeLabel(t: Trade): string | null {
 function groupTradesByDay(trades: Trade[]) {
   const map = new Map<string, Trade[]>();
   trades.forEach((t) => {
-    const key = new Date(t.date).toDateString();
+    const key = tradingDayKey(new Date(t.date));
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(t);
   });
@@ -3068,8 +3068,13 @@ function groupTradesByDay(trades: Trade[]) {
       const clean = dayTrades.filter((t) => t.disciplined === true).length;
       const flagged = dayTrades.filter((t) => t.disciplined === false).length;
       const unrated = dayTrades.filter((t) => t.disciplined === null).length;
+      // dateStr is "YYYY-MM-DD" (a stable grouping/sort key); displayLabel
+      // is the friendly version shown in the UI — parsed at noon to avoid
+      // timezone edge cases when turning the bare date back into a Date.
+      const displayLabel = new Date(`${dateStr}T12:00:00`).toDateString();
       return {
         dateStr,
+        displayLabel,
         trades: dayTrades,
         pnl,
         winRate: Math.round((wins / dayTrades.length) * 100),
@@ -3120,7 +3125,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
 </style></head>
 <body>
   <h1>NQ COCKPIT — Daily Report</h1>
-  <p class="sub">${day.dateStr}</p>
+  <p class="sub">${day.displayLabel}</p>
   <div class="stats">
     <div><strong>P&amp;L:</strong> ${fmtMoney(day.pnl)}</div>
     <div><strong>Trades:</strong> ${day.trades.length}</div>
@@ -3162,7 +3167,7 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
   y += 8;
   doc.setFontSize(10);
   doc.setFont("courier", "normal");
-  doc.text(day.dateStr, 14, y);
+  doc.text(day.displayLabel, 14, y);
   y += 10;
 
   doc.setFontSize(11);
@@ -3285,7 +3290,7 @@ function ReportsTab({ trades, snapshots }: { trades: Trade[]; snapshots: ChartSn
         days.map((day) => {
         const addedToLoser = findAddedToLoserInstances(day.trades);
         const laterIds = new Set(addedToLoser.map((i) => i.later.id));
-        const daySnapshots = snapshots.filter((s) => new Date(s.date).toDateString() === day.dateStr);
+        const daySnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === day.dateStr);
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
@@ -3293,7 +3298,7 @@ function ReportsTab({ trades, snapshots }: { trades: Trade[]; snapshots: ChartSn
             onClick={() => setExpanded(expanded === day.dateStr ? null : day.dateStr)}
           >
             <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-              <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
+              <span className="card-label" style={{ marginBottom: 0 }}>{day.displayLabel}</span>
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
               <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
               {addedToLoser.length > 0 && (

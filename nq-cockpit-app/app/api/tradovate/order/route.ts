@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { placeOrder, placeOSO, getAccounts, findOpenPosition, getEnrichedFills, extractPositionPnl, extractAccountOpenPnl, getCashBalance } from "@/lib/tradovate";
-import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
+import { getTradingWindowStatus, etTimeTodayToUtc, tradingDayStart } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
@@ -209,12 +209,11 @@ export async function POST(req: NextRequest) {
   try {
     const enrichedFills = await getEnrichedFills(env, parseInt(accountId));
     const now = new Date();
-    // Was: new Date(now.getFullYear(), now.getMonth(), now.getDate()), which
-    // uses the SERVER's local timezone (UTC on Railway) — that silently rolls
-    // "today" over at 5pm Pacific instead of midnight, not matching what a
-    // trader means by "today's" realized P&L. Use the same ET-based boundary
-    // the trading-window logic already uses elsewhere.
-    const startOfDay = etTimeTodayToUtc("00:00", now);
+    // A "trading day" runs 6pm ET to 6pm ET the next day (CME Globex
+    // convention), not midnight — matches tradingDayKey/tradingDayStart used
+    // everywhere else in the app now, so this guard's "today" agrees with
+    // what the UI shows as "today."
+    const startOfDay = tradingDayStart(now);
     const todaysFills = enrichedFills.filter((f: any) => new Date(f.timestamp) >= startOfDay);
     const matched = matchFillsToTrades(todaysFills as any, settings.multiplier);
     const todaysRealizedPnl = matched.reduce((s, t) => s + t.pnl, 0);

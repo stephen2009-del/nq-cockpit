@@ -34,6 +34,38 @@ export type TradingWindowSettings = {
   openingBufferMinutes: number; // 10
 };
 
+// A "trading day" runs 6pm ET to 6pm ET the next calendar day — matching
+// CME Globex's actual session rollover, not midnight. E.g. a trade at
+// 11pm ET Wednesday belongs to "Thursday's" trading day, same as a trade
+// at 3pm ET Thursday — both before the *next* 6pm ET rollover.
+
+// Returns a stable "YYYY-MM-DD" key for grouping/comparing which trading
+// day a given timestamp falls into.
+export function tradingDayKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
+  }).formatToParts(date);
+  const y = parseInt(parts.find((p) => p.type === "year")!.value, 10);
+  const m = parseInt(parts.find((p) => p.type === "month")!.value, 10);
+  const d = parseInt(parts.find((p) => p.type === "day")!.value, 10);
+  let hour = parseInt(parts.find((p) => p.type === "hour")!.value, 10);
+  if (hour === 24) hour = 0; // some environments report midnight as "24"
+  const dayDate = new Date(Date.UTC(y, m - 1, d));
+  if (hour >= 18) dayDate.setUTCDate(dayDate.getUTCDate() + 1);
+  return dayDate.toISOString().slice(0, 10);
+}
+
+// Returns the actual UTC timestamp marking the start of the *current*
+// trading day (the most recent 6pm ET rollover) — for server-side
+// date-range queries (WHERE date >= tradingDayStart).
+export function tradingDayStart(now: Date = new Date()): Date {
+  const todaySixPm = etTimeTodayToUtc("18:00", now);
+  if (now.getTime() >= todaySixPm.getTime()) return todaySixPm;
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  return etTimeTodayToUtc("18:00", yesterday);
+}
+
 function toMinutes(hhmm: string): number {
   const [h, m] = hhmm.split(":").map(Number);
   return h * 60 + m;

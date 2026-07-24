@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { tradingDayStart } from "@/lib/tradingWindow";
 
 export async function GET() {
   const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfDay = tradingDayStart(now);
   const checks = await prisma.intradayCheck.findMany({
     where: { date: { gte: startOfDay } },
     orderBy: { date: "asc" },
