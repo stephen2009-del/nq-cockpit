@@ -2055,9 +2055,11 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
   const wins = items.filter((t) => t.pnl > 0).length;
   const losses = items.filter((t) => t.pnl <= 0).length;
 
-  // How many positions were open at the same time as this one — counts
-  // itself, so 1 means it was never stacked with anything else. Only
-  // computable when both this trade and the one it's being compared against
+  // How many TRADE RECORDS were open at the same time as this one — a count
+  // of overlapping trades, not total contracts. If any of those trades were
+  // logged with size > 1, actual contract exposure at that moment was
+  // higher than this number. Counts itself, so 1 means it was never
+  // stacked with anything else. Only computable when both this trade and the one it's being compared against
   // have a recorded entry time (real synced fills going forward, or manual
   // entries with Entry Time filled in) — null otherwise rather than
   // guessing. Two trades "overlap" if either one's entry happened before
@@ -2115,7 +2117,7 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
         var tradePnl = d.perTradePnl[ctx.dataIndex];
         var concurrent = d.concurrentCounts[ctx.dataIndex];
         var lines = ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
-        lines.push(concurrent === null ? 'Concurrent positions: unknown (no entry time)' : 'Concurrent positions: ' + concurrent);
+        lines.push(concurrent === null ? 'Concurrent trades: unknown (no entry time)' : 'Concurrent trades: ' + concurrent);
         return lines;
       } } } },
       scales: {
