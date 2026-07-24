@@ -191,6 +191,7 @@ export default function Page() {
   const [emoEntries, setEmoEntries] = useState<EmotionalEntry[]>([]);
   const [emoForm, setEmoForm] = useState({ tag: "", note: "" });
   const [intradayInput, setIntradayInput] = useState("");
+  const [intradayNqInput, setIntradayNqInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
   const [newRuleText, setNewRuleText] = useState("");
@@ -393,14 +394,27 @@ export default function Page() {
   }
 
   async function addIntradayCheck() {
-    const qqqPrice = parseFloat(intradayInput);
-    if (isNaN(qqqPrice)) {
-      alert("Enter a QQQ price.");
-      return;
-    }
     const multiplier = parseFloat(preMarketForm.multiplier);
     if (isNaN(multiplier)) {
       alert("Enter today's NQ/QQQ multiplier on the Pre-Market tab first.");
+      return;
+    }
+    // Accepts either field — QQQ (the normal daytime case) or NQ directly.
+    // NQ trades nearly 24/5 on Globex but QQQ only trades equity hours, so
+    // during the overnight session you're watching an actual NQ number on
+    // your own chart, not a QQQ one — forcing a back-calculated, fictional
+    // QQQ price into that field just to log a check was backwards. Whichever
+    // one you fill in, the other is derived from it via today's multiplier,
+    // same as always.
+    const qqqTyped = parseFloat(intradayInput);
+    const nqTyped = parseFloat(intradayNqInput);
+    let qqqPrice: number;
+    if (!isNaN(qqqTyped)) {
+      qqqPrice = qqqTyped;
+    } else if (!isNaN(nqTyped)) {
+      qqqPrice = nqTyped / multiplier;
+    } else {
+      alert("Enter a QQQ price, or an NQ price directly (useful overnight when QQQ isn't trading).");
       return;
     }
     const check = await fetch("/api/intraday", {
@@ -409,6 +423,7 @@ export default function Page() {
     }).then((r) => r.json());
     setIntradayChecks((c) => [...c, check]);
     setIntradayInput("");
+    setIntradayNqInput("");
   }
 
   // Resizes/compresses an uploaded image client-side before it ever reaches
@@ -565,6 +580,8 @@ export default function Page() {
         <IntradayTab
           input={intradayInput}
           setInput={setIntradayInput}
+          nqInput={intradayNqInput}
+          setNqInput={setIntradayNqInput}
           onCheck={addIntradayCheck}
           checks={intradayChecks}
           todayPrep={preMarketHistory.find((p) => tradingDayKey(new Date(p.date)) === tradingDayKey(new Date())) || null}
@@ -1343,6 +1360,8 @@ function EmotionalJournalTab({
 function IntradayTab({
   input,
   setInput,
+  nqInput,
+  setNqInput,
   onCheck,
   checks,
   todayPrep,
@@ -1354,6 +1373,8 @@ function IntradayTab({
 }: {
   input: string;
   setInput: (v: string) => void;
+  nqInput: string;
+  setNqInput: (v: string) => void;
   onCheck: () => void;
   checks: IntradayCheckT[];
   todayPrep: PreMarketPrep | null;
@@ -1363,10 +1384,14 @@ function IntradayTab({
   deleteSnapshot: (id: number) => Promise<void>;
   updateSnapshotNote: (id: number, note: string) => Promise<void>;
 }) {
-  const qqq = parseFloat(input);
-  const validInput = !isNaN(qqq);
-  const valid = validInput && !!todayPrep;
   const multiplier = todayPrep?.multiplier ?? null;
+  const qqqTyped = parseFloat(input);
+  const nqTyped = parseFloat(nqInput);
+  // Whichever field has a value wins for the preview below — same
+  // either/or logic as addIntradayCheck itself uses when actually saving.
+  const qqq = !isNaN(qqqTyped) ? qqqTyped : (!isNaN(nqTyped) && multiplier ? nqTyped / multiplier : NaN);
+  const validInput = !isNaN(qqqTyped) || !isNaN(nqTyped);
+  const valid = validInput && !!todayPrep && !isNaN(qqq);
   const nqPrice = valid ? qqq * multiplier! : null;
   const observations = valid ? buildObservations(qqq, todayPrep, oiLevels, checks) : [];
 
@@ -1378,14 +1403,17 @@ function IntradayTab({
       <ExpectedMoveTracker checks={checks} todayPrep={todayPrep} />
       <div className="panel-box">
         <div className="panel-title">Intraday Check</div>
-        <div className="panel-desc">Punch in QQQ's current price any time during the day — NQ and today's observations update instantly.</div>
+        <div className="panel-desc">Punch in QQQ's current price any time during the day — or, overnight on Globex when QQQ isn't trading, enter the NQ price you're watching directly. NQ and today's observations update instantly either way.</div>
         <div className="grid2">
           <div className="field"><label>Current QQQ Price</label>
-            <input type="number" step="0.01" value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. 698.50" />
+            <input type="number" step="0.01" value={input} onChange={(e) => { setInput(e.target.value); if (e.target.value) setNqInput(""); }} placeholder="e.g. 698.50" />
           </div>
-          <div style={{ display: "flex", alignItems: "flex-end" }}>
-            <button className="btn primary" onClick={onCheck} disabled={!validInput} style={{ width: "100%" }}>Log Check</button>
+          <div className="field"><label>— or — Current NQ Price directly</label>
+            <input type="number" step="0.25" value={nqInput} onChange={(e) => { setNqInput(e.target.value); if (e.target.value) setInput(""); }} placeholder="e.g. 28500 (overnight Globex)" />
           </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <button className="btn primary" onClick={onCheck} disabled={!validInput} style={{ width: "100%" }}>Log Check</button>
         </div>
 
         {validInput && !todayPrep && (
