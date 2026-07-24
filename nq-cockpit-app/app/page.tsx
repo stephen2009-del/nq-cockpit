@@ -498,27 +498,27 @@ export default function Page() {
 
       <div className="strip">
         <div className="gauge-card">
-          <div className="card-label">Discipline Gauge</div>
+          <div className="card-label">Discipline Gauge ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className="dial-wrap">
             <Dial score={disciplineScore} color={scoreColor} />
             <div>
               <div className="dial-num" style={{ color: scoreColor }}>{disciplineScore === null ? "—" : disciplineScore + "%"}</div>
-              <div className="card-sub">{trades.length} trades logged</div>
+              <div className="card-sub">{ratedTrades.length} rated trade(s) ({envFilteredTrades.length} total)</div>
             </div>
           </div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Today's P&amp;L</div>
+          <div className="card-label">Today's P&amp;L ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${todaysPnl > 0 ? "pos" : todaysPnl < 0 ? "neg" : ""}`}>{fmtMoney(todaysPnl)}</div>
           <div className="card-sub">{todaysTrades.length} trade(s) today</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Discipline Streak</div>
+          <div className="card-label">Discipline Streak ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${streak > 0 ? "pos" : ""}`}>{streak}</div>
           <div className="card-sub">consecutive clean trades</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Daily Loss Limit</div>
+          <div className="card-label">Daily Loss Limit ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${lossPct >= 100 ? "neg" : lossPct >= 70 ? "warn" : ""}`}>{fmtMoney(-lossUsed)} / {fmtMoney(-limit)}</div>
           <div className="bar-track"><div className="bar-fill" style={{ width: `${lossPct}%`, background: lossPct >= 100 ? "var(--red)" : lossPct >= 70 ? "var(--amber)" : "var(--cyan)" }} /></div>
         </div>
