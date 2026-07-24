@@ -3217,6 +3217,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : ""}>
       <td>${laterIds.has(t.id) ? "\u26a0" : ""}</td>
       <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${t.symbol}</td>
       <td>${t.source.toUpperCase()}</td>
       <td>${t.dir.toUpperCase()}</td>
       <td>${t.entry ?? "-"}</td>
@@ -3263,7 +3264,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
   ${chartsHtml}
   <h2>Trades</h2>
   <table>
-    <thead><tr><th></th><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+    <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
   ${daySnapshots.length > 0 ? `
@@ -3311,14 +3312,15 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
   const cols = [
     { label: "", x: 14 },
     { label: "Time", x: 20 },
-    { label: "Account", x: 46 },
-    { label: "Dir", x: 71 },
-    { label: "Entry", x: 91 },
-    { label: "Exit", x: 116 },
-    { label: "Hold", x: 141 },
-    { label: "P&L", x: 166 },
-    { label: "Discipline", x: 196 },
-    { label: "Emotion", x: 231 },
+    { label: "Symbol", x: 40 },
+    { label: "Account", x: 58 },
+    { label: "Dir", x: 80 },
+    { label: "Entry", x: 98 },
+    { label: "Exit", x: 120 },
+    { label: "Hold", x: 142 },
+    { label: "P&L", x: 164 },
+    { label: "Discipline", x: 190 },
+    { label: "Emotion", x: 222 },
   ];
   doc.setFont("courier", "bold");
   cols.forEach((c) => doc.text(c.label, c.x, y));
@@ -3336,14 +3338,15 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
       doc.text("!", cols[0].x, y);
     }
     doc.text(time, cols[1].x, y);
-    doc.text(t.source.toUpperCase(), cols[2].x, y);
-    doc.text(t.dir.toUpperCase(), cols[3].x, y);
-    doc.text(t.entry !== null ? String(t.entry) : "-", cols[4].x, y);
-    doc.text(t.exit !== null ? String(t.exit) : "-", cols[5].x, y);
-    doc.text(holdTimeLabel(t) ?? "-", cols[6].x, y);
-    doc.text(fmtMoney(t.pnl), cols[7].x, y);
-    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[8].x, y);
-    doc.text((t.emotion || "-").slice(0, 14), cols[9].x, y);
+    doc.text(t.symbol, cols[2].x, y);
+    doc.text(t.source.toUpperCase(), cols[3].x, y);
+    doc.text(t.dir.toUpperCase(), cols[4].x, y);
+    doc.text(t.entry !== null ? String(t.entry) : "-", cols[5].x, y);
+    doc.text(t.exit !== null ? String(t.exit) : "-", cols[6].x, y);
+    doc.text(holdTimeLabel(t) ?? "-", cols[7].x, y);
+    doc.text(fmtMoney(t.pnl), cols[8].x, y);
+    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[9].x, y);
+    doc.text((t.emotion || "-").slice(0, 14), cols[10].x, y);
     if (laterIds.has(t.id)) doc.setTextColor(0, 0, 0);
     y += 6;
   });
@@ -3485,12 +3488,13 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
                 </div>
               )}
               <table>
-                <thead><tr><th></th><th>Time</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+                <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
                 <tbody>
                   {day.trades.map((t) => (
                     <tr key={t.id} style={laterIds.has(t.id) ? { background: "rgba(229,72,77,0.12)" } : undefined}>
                       <td>{laterIds.has(t.id) ? "⚠" : ""}</td>
                       <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                      <td>{t.symbol}</td>
                       <td><span className={`tag ${t.source === "live" ? "flag" : t.source === "demo" ? "clean" : "na"}`}>{t.source.toUpperCase()}</span></td>
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
                       <td>{t.entry ?? "—"}</td>

@@ -63,6 +63,7 @@ export async function GET(req: NextRequest) {
       (t) => `
     <tr>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.symbol}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.source.toUpperCase()}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.dir.toUpperCase()}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.entry !== null ? t.entry : "-"}</td>
@@ -89,6 +90,7 @@ export async function GET(req: NextRequest) {
           ? `<table style="border-collapse:collapse;width:100%;font-size:13px;">
               <thead><tr>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Time</th>
+                <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Symbol</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Account</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Dir</th>
                 <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Entry</th>
