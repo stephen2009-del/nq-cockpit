@@ -746,7 +746,7 @@ export default function Page() {
         </div>
       )}
 
-      {tab === "dashboard" && <Dashboard trades={trades} emoEntries={emoEntries} />}
+      {tab === "dashboard" && <Dashboard trades={envFilteredTrades} allTrades={trades} emoEntries={emoEntries} envLabel={settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} />}
 
       {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
 
@@ -2552,8 +2552,8 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
   );
 }
 
-function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: EmotionalEntry[] }) {
-  if (trades.length === 0) {
+function Dashboard({ trades, allTrades, emoEntries, envLabel }: { trades: Trade[]; allTrades: Trade[]; emoEntries: EmotionalEntry[]; envLabel: string }) {
+  if (allTrades.length === 0) {
     return (
       <>
         <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>
@@ -2566,21 +2566,21 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   // panel exists is to answer "does today's P&L mix Demo and Live," so it
   // needs to use the same "today" scope as that card, not every trade ever.
   const todayStr = tradingDayKey(new Date());
-  const todaysAllTrades = trades.filter((t) => tradingDayKey(new Date(t.date)) === todayStr);
+  const todaysAllTrades = allTrades.filter((t) => tradingDayKey(new Date(t.date)) === todayStr);
   const envBuckets: { label: string; trades: Trade[] }[] = [
     { label: "Live", trades: todaysAllTrades.filter((t) => t.source === "live") },
     { label: "Demo", trades: todaysAllTrades.filter((t) => t.source === "demo") },
     { label: "Manual (legacy, env unknown)", trades: todaysAllTrades.filter((t) => t.source === "manual") },
   ];
   const allTimeEnvBuckets: { label: string; trades: Trade[] }[] = [
-    { label: "Live", trades: trades.filter((t) => t.source === "live") },
-    { label: "Demo", trades: trades.filter((t) => t.source === "demo") },
-    { label: "Manual (legacy, env unknown)", trades: trades.filter((t) => t.source === "manual") },
+    { label: "Live", trades: allTrades.filter((t) => t.source === "live") },
+    { label: "Demo", trades: allTrades.filter((t) => t.source === "demo") },
+    { label: "Manual (legacy, env unknown)", trades: allTrades.filter((t) => t.source === "manual") },
   ];
 
   const wins = trades.filter((t) => t.pnl > 0).length;
   const losses = trades.filter((t) => t.pnl < 0).length;
-  const winRate = Math.round((wins / trades.length) * 100);
+  const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0;
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
   const avgWin = wins ? trades.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
   const avgLoss = losses ? Math.abs(trades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0) / losses) : 0;
@@ -2649,7 +2649,7 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
 
       <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-          <div className="panel-title" style={{ margin: 0 }}>Performance Summary</div>
+          <div className="panel-title" style={{ margin: 0 }}>Performance Summary — All-Time ({envLabel} + manual)</div>
           <button className="btn small ghost" onClick={() => downloadTradesCSV(trades)}>Export CSV</button>
         </div>
         <div className="stat-grid">
@@ -2667,7 +2667,7 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </div>
 
       <div className="panel-box">
-        <div className="panel-title">Plan Discipline</div>
+        <div className="panel-title">Plan Discipline — All-Time ({envLabel} + manual)</div>
         <div className="panel-desc">
           Compares what actually happened to your own stated plan (planned stop / target, logged with the trade) —
           not a judgment call, just your plan vs. your execution. {tradesWithAPlan} of {trades.length} trades had a plan declared.
@@ -2694,14 +2694,14 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </div>
 
       <div className="panel-box">
-        <div className="panel-title">Equity Curve</div>
+        <div className="panel-title">Equity Curve — All-Time ({envLabel} + manual)</div>
         <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
           <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="var(--line)" strokeDasharray="4 4" />
           <polyline points={coords} fill="none" stroke={curveColor} strokeWidth="2" />
         </svg>
       </div>
       <div className="panel-box">
-        <div className="panel-title">Disciplined vs. Undisciplined</div>
+        <div className="panel-title">Disciplined vs. Undisciplined — All-Time ({envLabel} + manual)</div>
         <div className="panel-desc">Does following your rules actually pay?</div>
         <div className="compare-bars">
           <CompareRow label="Clean avg P&L" value={cleanAvg} max={maxAbs} display={fmtMoney(cleanAvg)} />
