@@ -2998,6 +2998,20 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
         </div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Session</div>
+        <div className="panel-desc">Log out of this device — you'll need your username and password to log back in.</div>
+        <button
+          className="btn small ghost"
+          onClick={async () => {
+            await fetch("/api/auth/logout", { method: "POST" });
+            window.location.href = "/login";
+          }}
+        >
+          Log Out
+        </button>
+      </div>
     </>
   );
 }
