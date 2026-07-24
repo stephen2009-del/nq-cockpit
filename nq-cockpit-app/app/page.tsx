@@ -566,7 +566,7 @@ export default function Page() {
         />
       )}
 
-      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} />}
+      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} settings={settings} />}
 
       {tab === "checklist" && (
         <>
@@ -2261,7 +2261,14 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
   useEffect(() => {
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
       .then((r) => r.json())
-      .then((d) => setAccounts(d.accounts || []));
+      .then((d) => {
+        setAccounts(d.accounts || []);
+        // Only one account ever shows up per environment in practice — no
+        // reason to make you pick it manually every time.
+        if (d.accounts?.length === 1) {
+          setAccountId(String(d.accounts[0].id));
+        }
+      });
   }, [settings.tradovateEnv]);
 
   async function sync() {
@@ -3288,9 +3295,17 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
   doc.save(`nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
-function ReportsTab({ trades, snapshots }: { trades: Trade[]; snapshots: ChartSnapshot[] }) {
+function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; settings: Settings }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">("all");
+  const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">(settings.tradovateEnv === "live" ? "live" : "demo");
+  // Settings is the single source of truth for which environment you're
+  // looking at — whenever it changes elsewhere in the app, this follows
+  // automatically instead of silently staying on whatever was last picked
+  // here. "All accounts" is still available as a manual override below,
+  // it just won't persist across a Settings change.
+  useEffect(() => {
+    setEnvFilter(settings.tradovateEnv === "live" ? "live" : "demo");
+  }, [settings.tradovateEnv]);
   const filteredTrades = envFilter === "all" ? trades : trades.filter((t) => t.source === envFilter);
   const days = groupTradesByDay(filteredTrades);
 
