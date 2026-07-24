@@ -2080,7 +2080,27 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
     return count;
   });
 
-  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts }).replace(/</g, "\\u003c");
+  // Same overlap check as above, but keeping the actual entry timestamps of
+  // every trade that counted toward that number — so the tooltip can name
+  // them instead of just giving a bare count. Includes seconds since this
+  // app frequently logs several trades within the same minute.
+  const concurrentEntryLabels: string[][] = items.map((it) => {
+    if (!it.entryDate || !it.date) return [];
+    const entryI = new Date(it.entryDate).getTime();
+    const exitI = new Date(it.date).getTime();
+    const times: number[] = [];
+    for (const other of items) {
+      if (!other.entryDate || !other.date) continue;
+      const entryJ = new Date(other.entryDate).getTime();
+      const exitJ = new Date(other.date).getTime();
+      if (entryI < exitJ && entryJ < exitI) times.push(entryJ);
+    }
+    return times
+      .sort((a, b) => a - b)
+      .map((t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  });
+
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts, concurrentEntryLabels }).replace(/</g, "\\u003c");
 
   return `
 <canvas id="equityChart" height="90"></canvas>
@@ -2118,6 +2138,9 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
         var concurrent = d.concurrentCounts[ctx.dataIndex];
         var lines = ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
         lines.push(concurrent === null ? 'Concurrent trades: unknown (no entry time)' : 'Concurrent trades: ' + concurrent);
+        if (concurrent !== null && concurrent > 1) {
+          lines.push('Entered at: ' + d.concurrentEntryLabels[ctx.dataIndex].join(', '));
+        }
         return lines;
       } } } },
       scales: {
