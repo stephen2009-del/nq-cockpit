@@ -1545,9 +1545,15 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         // auto-selecting if there's genuinely just one account and nothing
         // configured, otherwise leaves it for manual selection.
         const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
-        const preferredExists = preferredId && d.accounts?.some((a: any) => String(a.id) === String(preferredId));
-        if (preferredExists) {
-          setForm((f) => ({ ...f, accountId: String(preferredId) }));
+        // Tradovate accounts have both an internal `id` and a separate
+        // human-readable `name` (the account number, e.g. "1003033") — you
+        // see `name` in the dropdown, so match against either rather than
+        // assuming what got typed into Settings is specifically the id.
+        const preferredMatch = preferredId
+          ? d.accounts?.find((a: any) => String(a.id) === String(preferredId) || String(a.name) === String(preferredId))
+          : null;
+        if (preferredMatch) {
+          setForm((f) => ({ ...f, accountId: String(preferredMatch.id) }));
         } else if (d.accounts?.length === 1) {
           setForm((f) => ({ ...f, accountId: String(d.accounts[0].id) }));
         }
@@ -2274,9 +2280,11 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
         // falling back to auto-select only when there's genuinely just one
         // account and nothing configured.
         const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
-        const preferredExists = preferredId && d.accounts?.some((a: any) => String(a.id) === String(preferredId));
-        if (preferredExists) {
-          setAccountId(String(preferredId));
+        const preferredMatch = preferredId
+          ? d.accounts?.find((a: any) => String(a.id) === String(preferredId) || String(a.name) === String(preferredId))
+          : null;
+        if (preferredMatch) {
+          setAccountId(String(preferredMatch.id));
         } else if (d.accounts?.length === 1) {
           setAccountId(String(d.accounts[0].id));
         }
