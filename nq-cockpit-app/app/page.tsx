@@ -243,6 +243,19 @@ export default function Page() {
     loadAll();
   }, []);
 
+  // The Alpaca-backed Intraday auto-log cron writes a new check every minute
+  // during regular market hours, but until now nothing on the client ever
+  // re-fetched it after the initial page load — meaning a tab left open all
+  // day silently showed a stale first-load snapshot. This keeps
+  // intradayChecks (and anything derived from it, like the Expected Move
+  // tracker below) actually current without requiring a manual reload.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch("/api/intraday").then((r) => r.json()).then(setIntradayChecks).catch(() => {});
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     if (form.entry && form.exit) {
       const entry = parseFloat(form.entry), exit = parseFloat(form.exit), size = parseFloat(form.size) || 1;
@@ -994,6 +1007,111 @@ function RangeBar({ label, low, mid, high }: { label: string; low: number; mid: 
 
 type Observation = { level: "info" | "warning" | "critical"; text: string };
 
+// A dedicated, always-visible visual for today's expected-move plan — separate
+// from the manual Intraday Check card below (which only shows its RangeBar
+// when you type a price in) and from Today's Chart (a time series you have to
+// read point-by-point). This one just answers "where is price right now,
+// relative to the plan" at a glance, using whatever the most recent check is
+// — auto-logged every minute during market hours, or your last manual one.
+function ExpectedMoveTracker({ checks, todayPrep }: { checks: IntradayCheckT[]; todayPrep: PreMarketPrep | null }) {
+  const todayStr = tradingDayKey(new Date());
+  const todayChecks = checks.filter((c) => tradingDayKey(new Date(c.date)) === todayStr);
+  const latest = todayChecks.length > 0 ? todayChecks[todayChecks.length - 1] : null;
+
+  if (!todayPrep) {
+    return (
+      <div className="panel-box">
+        <div className="panel-title">Expected Move</div>
+        <div className="empty-state"><div className="big">🎯</div>No Pre-Market prep logged today — log QQQ price, multiplier, and estimated move on the Pre-Market tab to enable this.</div>
+      </div>
+    );
+  }
+  if (!latest) {
+    return (
+      <div className="panel-box">
+        <div className="panel-title">Expected Move</div>
+        <div className="empty-state"><div className="big">🎯</div>No price checks yet today. This fills in automatically once the market opens (auto-logged every minute, 9:30am–4:00pm ET) or as soon as you log a manual Intraday check.</div>
+      </div>
+    );
+  }
+
+  const low = todayPrep.qqqPrice - todayPrep.estimatedMove;
+  const high = todayPrep.qqqPrice + todayPrep.estimatedMove;
+  const nqLow = low * todayPrep.multiplier;
+  const nqHigh = high * todayPrep.multiplier;
+  const qqq = latest.qqqPrice;
+  const moveFromAnchor = qqq - todayPrep.qqqPrice;
+  const pctUsed = todayPrep.estimatedMove > 0 ? (Math.abs(moveFromAnchor) / todayPrep.estimatedMove) * 100 : 0;
+  const outside = qqq < low || qqq > high;
+  const dir = moveFromAnchor >= 0 ? "up" : "down";
+  const ageMinutes = Math.round((Date.now() - new Date(latest.date).getTime()) / 60000);
+  // Position on the bar is clamped to 0-100% so an out-of-range price still
+  // renders (pinned to whichever edge it blew past) instead of drawing
+  // outside the bar entirely — the red coloring plus the alert text above is
+  // what actually communicates "outside," not the marker's raw position.
+  const clampedPct = Math.max(0, Math.min(100, ((qqq - low) / (high - low)) * 100));
+  const markerColor = outside ? "var(--red)" : pctUsed >= 70 ? "var(--amber)" : "var(--cyan)";
+
+  return (
+    <div className="panel-box">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div className="panel-title" style={{ margin: 0 }}>Expected Move</div>
+        <span className="card-sub" style={{ marginTop: 0 }}>Updated {ageMinutes <= 0 ? "just now" : `${ageMinutes}m ago`}</span>
+      </div>
+      <div className="panel-desc">Today's plan: pivot {todayPrep.qqqPrice.toFixed(2)} QQQ (NQ {todayPrep.nqPrice.toFixed(1)}) ± {todayPrep.estimatedMove} pts.</div>
+
+      {outside && (
+        <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
+          ⚠ OUTSIDE today's expected move — {Math.abs(moveFromAnchor).toFixed(2)} QQQ pts {dir} of plan ({pctUsed.toFixed(0)}% of estimated move, already exceeded). This is now outside your normal-day scenario.
+        </div>
+      )}
+      {!outside && pctUsed >= 70 && (
+        <div className="status-banner status-warn" style={{ marginBottom: 12 }}>
+          ⚠ Nearing the edge — {pctUsed.toFixed(0)}% of today's estimated move used ({dir}).
+        </div>
+      )}
+
+      <div style={{ position: "relative", height: 14, marginTop: 8 }}>
+        <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: "var(--amber)", opacity: 0.6 }} />
+        <div style={{ height: 14, background: "var(--panel-2)", borderRadius: 7, border: "1px solid var(--line)" }} />
+        <div
+          style={{
+            position: "absolute",
+            left: `calc(${clampedPct}% - 7px)`,
+            top: -6,
+            width: 14,
+            height: 26,
+            borderRadius: 3,
+            background: markerColor,
+            border: "2px solid var(--bg)",
+          }}
+          title={`QQQ ${qqq.toFixed(2)}`}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11, color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace" }}>
+        <span>LOW {low.toFixed(2)} ({nqLow.toFixed(1)})</span>
+        <span style={{ color: "var(--amber)" }}>PIVOT {todayPrep.qqqPrice.toFixed(2)} ({todayPrep.nqPrice.toFixed(1)})</span>
+        <span>HIGH {high.toFixed(2)} ({nqHigh.toFixed(1)})</span>
+      </div>
+
+      <div style={{ display: "flex", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="card-sub">Current QQQ</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{qqq.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="card-sub">Current NQ (calc)</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{latest.nqPrice.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="card-sub">Move used</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20, color: markerColor }}>{pctUsed.toFixed(0)}% {dir}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function buildObservations(
   currentQqq: number,
   prep: PreMarketPrep | null,
@@ -1257,6 +1375,7 @@ function IntradayTab({
 
   return (
     <>
+      <ExpectedMoveTracker checks={checks} todayPrep={todayPrep} />
       <div className="panel-box">
         <div className="panel-title">Intraday Check</div>
         <div className="panel-desc">Punch in QQQ's current price any time during the day — NQ and today's observations update instantly.</div>
