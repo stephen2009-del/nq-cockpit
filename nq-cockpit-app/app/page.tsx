@@ -3188,6 +3188,40 @@ function findAddedToLoserInstances(trades: Trade[]): AddedToLoserInstance[] {
   return results;
 }
 
+// Mirror of findAddedToLoserInstances — same overlap logic, but flagging the
+// opposite (and desirable) pattern: adding to an already-open position at a
+// price that's moving further in your favor, i.e. pyramiding a winner rather
+// than averaging down a loser. Kept as a fully separate function (rather
+// than a shared helper with a flag) to match the existing style here, and
+// because a tie (later.entry === earlier.entry) should count as neither —
+// that's handled by simply inverting the adverse check's strict inequality,
+// not by "not adverse".
+type AddedToWinnerInstance = { earlier: Trade; later: Trade };
+function findAddedToWinnerInstances(trades: Trade[]): AddedToWinnerInstance[] {
+  const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
+  const results: AddedToWinnerInstance[] = [];
+  for (const later of withEntry) {
+    let best: Trade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of withEntry) {
+      if (earlier.id === later.id) continue;
+      if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
+      const earlierEntry = new Date(earlier.entryDate!).getTime();
+      const earlierExit = new Date(earlier.date).getTime();
+      const laterEntry = new Date(later.entryDate!).getTime();
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const favorable = earlier.dir === "long" ? later.entry! > earlier.entry! : later.entry! < earlier.entry!;
+      if (!favorable) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
+    }
+    if (best) results.push({ earlier: best, later });
+  }
+  return results;
+}
+
 function holdTimeLabel(t: Trade): string | null {
   if (!t.entryDate) return null;
   const ms = new Date(t.date).getTime() - new Date(t.entryDate).getTime();
@@ -3234,11 +3268,13 @@ function groupTradesByDay(trades: Trade[]) {
 async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = []): Promise<string> {
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+  const addedToWinner = findAddedToWinnerInstances(day.trades);
+  const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
   const rows = day.trades
     .map(
       (t) => `
-    <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : ""}>
-      <td>${laterIds.has(t.id) ? "\u26a0" : ""}</td>
+    <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : winnerIds.has(t.id) ? ' style="background:rgba(63,208,201,0.15);"' : ""}>
+      <td>${laterIds.has(t.id) ? "\u26a0" : winnerIds.has(t.id) ? "\u2605" : ""}</td>
       <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
       <td>${t.symbol}</td>
       <td>${t.source.toUpperCase()}</td>
@@ -3283,6 +3319,11 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     <div style="font-weight:bold;margin-bottom:6px;">\u26a0 Added to a losing position \u2014 ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
     ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.</div>`).join("")}
   </div>` : ""}
+  ${addedToWinner.length > 0 ? `
+  <div style="border:1px solid #3FD0C9;border-radius:6px;padding:12px 14px;background:rgba(63,208,201,0.08);margin-bottom:16px;">
+    <div style="font-weight:bold;margin-bottom:6px;">\u2605 Added to a winning position \u2014 ${addedToWinner.length} instance${addedToWinner.length === 1 ? "" : "s"}</div>
+    ${addedToWinner.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.</div>`).join("")}
+  </div>` : ""}
   <h2>Equity Curve</h2>
   ${chartsHtml}
   <h2>Trades</h2>
@@ -3302,10 +3343,12 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
 </body></html>`;
 }
 
-async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = []) {
+async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all") {
   const doc = new jsPDF({ orientation: "landscape" });
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+  const addedToWinner = findAddedToWinnerInstances(day.trades);
+  const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
   let y = 20;
   doc.setFont("courier", "bold");
   doc.setFontSize(16);
@@ -3328,7 +3371,14 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
     doc.text(`\u26a0 Added to a losing position \u00d7 ${addedToLoser.length} (marked with \u26a0 below)`, 14, y);
     doc.setTextColor(0, 0, 0);
     y += 8;
-  } else {
+  }
+  if (addedToWinner.length > 0) {
+    doc.setTextColor(63, 208, 201);
+    doc.text(`\u2605 Added to a winning position \u00d7 ${addedToWinner.length} (marked with \u2605 below)`, 14, y);
+    doc.setTextColor(0, 0, 0);
+    y += 8;
+  }
+  if (addedToLoser.length === 0 && addedToWinner.length === 0) {
     y += 2;
   }
 
@@ -3359,6 +3409,9 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
     if (laterIds.has(t.id)) {
       doc.setTextColor(229, 72, 77);
       doc.text("!", cols[0].x, y);
+    } else if (winnerIds.has(t.id)) {
+      doc.setTextColor(63, 208, 201);
+      doc.text("+", cols[0].x, y);
     }
     doc.text(time, cols[1].x, y);
     doc.text(t.symbol, cols[2].x, y);
@@ -3370,7 +3423,7 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
     doc.text(fmtMoney(t.pnl), cols[8].x, y);
     doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[9].x, y);
     doc.text((t.emotion || "-").slice(0, 14), cols[10].x, y);
-    if (laterIds.has(t.id)) doc.setTextColor(0, 0, 0);
+    if (laterIds.has(t.id) || winnerIds.has(t.id)) doc.setTextColor(0, 0, 0);
     y += 6;
   });
 
@@ -3410,7 +3463,7 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
     }
   }
 
-  doc.save(`nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
+  doc.save(`nq-cockpit-report-${envLabel}-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
 function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; settings: Settings }) {
@@ -3446,6 +3499,8 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
         days.map((day) => {
         const addedToLoser = findAddedToLoserInstances(day.trades);
         const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+        const addedToWinner = findAddedToWinnerInstances(day.trades);
+        const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
         const daySnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === day.dateStr);
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
@@ -3459,6 +3514,9 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
               <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
               {addedToLoser.length > 0 && (
                 <span className="tag flag">⚠ Added to loser × {addedToLoser.length}</span>
+              )}
+              {addedToWinner.length > 0 && (
+                <span className="tag clean">★ Added to winner × {addedToWinner.length}</span>
               )}
             </div>
             <button
@@ -3484,7 +3542,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
                   a.href = url;
-                  a.download = `nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.html`;
+                  a.download = `nq-cockpit-report-${envFilter}-${day.dateStr.replace(/\s+/g, "-")}.html`;
                   document.body.appendChild(a);
                   a.click();
                   document.body.removeChild(a);
@@ -3494,7 +3552,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
             >
               Download HTML
             </button>
-            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots); }}>Download PDF</button>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
@@ -3510,12 +3568,24 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
                   <div className="card-sub" style={{ marginTop: 6, opacity: 0.7 }}>Only detects this for trades with a recorded entry time (Sync to Journal, or manually logged with Entry Time filled in) — older entries without one aren't included.</div>
                 </div>
               )}
+              {addedToWinner.length > 0 && (
+                <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid var(--cyan)", borderRadius: 6, background: "rgba(63,208,201,0.08)" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>★ Added to a winning position — {addedToWinner.length} instance{addedToWinner.length === 1 ? "" : "s"}</div>
+                  {addedToWinner.map((inst, i) => (
+                    <div key={i} className="card-sub" style={{ marginTop: i === 0 ? 0 : 4 }}>
+                      {inst.earlier.symbol} {inst.earlier.dir.toUpperCase()}: entered {inst.earlier.entry} at {new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })},
+                      then added at {inst.later.entry} at {new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.
+                    </div>
+                  ))}
+                  <div className="card-sub" style={{ marginTop: 6, opacity: 0.7 }}>Same entry-time requirement as the losing-position detector above.</div>
+                </div>
+              )}
               <table>
                 <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
                 <tbody>
                   {day.trades.map((t) => (
-                    <tr key={t.id} style={laterIds.has(t.id) ? { background: "rgba(229,72,77,0.12)" } : undefined}>
-                      <td>{laterIds.has(t.id) ? "⚠" : ""}</td>
+                    <tr key={t.id} style={laterIds.has(t.id) ? { background: "rgba(229,72,77,0.12)" } : winnerIds.has(t.id) ? { background: "rgba(63,208,201,0.12)" } : undefined}>
+                      <td>{laterIds.has(t.id) ? "⚠" : winnerIds.has(t.id) ? "★" : ""}</td>
                       <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
                       <td>{t.symbol}</td>
                       <td><span className={`tag ${t.source === "live" ? "flag" : t.source === "demo" ? "clean" : "na"}`}>{t.source.toUpperCase()}</span></td>
