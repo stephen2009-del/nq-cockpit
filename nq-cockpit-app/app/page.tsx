@@ -2025,7 +2025,7 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
 // actually render, same as any report that embeds a hosted chart library.
 // Zoom/pan isn't included here (would mean a second CDN plugin + version
 // matching to get right) — flag if that's still wanted after seeing these.
-async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: string | null; date?: string | null }[]): Promise<string> {
+async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: string | null; date?: string | null; entryPrice?: number | null }[]): Promise<string> {
   if (items.length === 0) {
     return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
   }
@@ -2080,24 +2080,30 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
     return count;
   });
 
-  // Same overlap check as above, but keeping the actual entry timestamps of
-  // every trade that counted toward that number — so the tooltip can name
-  // them instead of just giving a bare count. Includes seconds since this
-  // app frequently logs several trades within the same minute.
+  // Same overlap check as above, but keeping the actual entry timestamp AND
+  // entry price of every trade that counted toward that number — so the
+  // tooltip can name them instead of just giving a bare count. Includes
+  // seconds since this app frequently logs several trades within the same
+  // minute. Price is shown as "—" for any trade missing entryPrice (older
+  // records) rather than silently omitting that trade from the list.
   const concurrentEntryLabels: string[][] = items.map((it) => {
     if (!it.entryDate || !it.date) return [];
     const entryI = new Date(it.entryDate).getTime();
     const exitI = new Date(it.date).getTime();
-    const times: number[] = [];
+    const overlapping: { entryTime: number; entryPrice: number | null | undefined }[] = [];
     for (const other of items) {
       if (!other.entryDate || !other.date) continue;
       const entryJ = new Date(other.entryDate).getTime();
       const exitJ = new Date(other.date).getTime();
-      if (entryI < exitJ && entryJ < exitI) times.push(entryJ);
+      if (entryI < exitJ && entryJ < exitI) overlapping.push({ entryTime: entryJ, entryPrice: other.entryPrice });
     }
-    return times
-      .sort((a, b) => a - b)
-      .map((t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    return overlapping
+      .sort((a, b) => a.entryTime - b.entryTime)
+      .map((o) => {
+        const timeLabel = new Date(o.entryTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const priceLabel = o.entryPrice !== null && o.entryPrice !== undefined ? o.entryPrice : "—";
+        return `${timeLabel} @ ${priceLabel}`;
+      });
   });
 
   const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts, concurrentEntryLabels }).replace(/</g, "\\u003c");
@@ -2254,7 +2260,7 @@ ${addedToLoser.length > 0 ? `
   ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.side.toUpperCase()}: entered ${inst.earlier.entryPrice.toFixed(2)} at ${new Date(inst.earlier.entryTime).toLocaleString()}, then added at ${inst.later.entryPrice.toFixed(2)} at ${new Date(inst.later.entryTime).toLocaleString()} while the first was still open and underwater.</div>`).join("")}
 </div>` : ""}
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl, entryDate: t.entryTime, date: t.exitTime })))}
+${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl, entryDate: t.entryTime, date: t.exitTime, entryPrice: t.entryPrice })))}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
@@ -3341,7 +3347,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
     .join("");
 
   const chartsHtml = await buildChartsHtml(
-    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl, entryDate: t.entryDate, date: t.date }))
+    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl, entryDate: t.entryDate, date: t.date, entryPrice: t.entry }))
   );
 
   return `<!DOCTYPE html>
