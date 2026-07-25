@@ -3913,18 +3913,18 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
           <div className="panel-title" style={{ marginBottom: 2 }}>{reportView === "daily" ? "Daily Reports" : "Weekly Reports"}</div>
           <div className="panel-desc" style={{ marginBottom: 0 }}>{reportView === "daily" ? "Same numbers as your daily email, browsable here — plus a PDF download for any day." : "Every day rolled into one report per trading week (Sun 6pm ET – Fri 1pm ET)."}</div>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden", flexShrink: 0 }}>
             <button
               className="btn small ghost"
-              style={{ borderRadius: 0, background: reportView === "daily" ? "var(--panel-2)" : undefined, color: reportView === "daily" ? "var(--cyan)" : undefined }}
+              style={{ borderRadius: 0, whiteSpace: "nowrap", background: reportView === "daily" ? "var(--panel-2)" : undefined, color: reportView === "daily" ? "var(--cyan)" : undefined }}
               onClick={() => setReportView("daily")}
             >
               Daily
             </button>
             <button
               className="btn small ghost"
-              style={{ borderRadius: 0, background: reportView === "weekly" ? "var(--panel-2)" : undefined, color: reportView === "weekly" ? "var(--cyan)" : undefined }}
+              style={{ borderRadius: 0, whiteSpace: "nowrap", background: reportView === "weekly" ? "var(--panel-2)" : undefined, color: reportView === "weekly" ? "var(--cyan)" : undefined }}
               onClick={() => setReportView("weekly")}
             >
               Weekly
