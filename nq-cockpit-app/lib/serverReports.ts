@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { tradingDayKey } from "./tradingWindow";
 
 // Mirrors the `Trade` shape from the Prisma model — duplicated here rather
 // than imported from app/page.tsx since that's a "use client" component and
@@ -150,7 +151,19 @@ export function buildRichReportHtml(
     )
     .join("");
 
-  const equityLabels = group.trades.map((t) => new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  const dayKeys = group.trades.map((t) => tradingDayKey(new Date(t.date)));
+  const isMultiDay = new Set(dayKeys).size > 1;
+  // When this chart spans more than one trading day (a weekly report), a
+  // bare time like "07:37 AM" is genuinely ambiguous — several different
+  // days can share the same clock time. Prefixing with a short weekday
+  // fixes that in the tooltip/axis labels themselves; the background
+  // shading below (keyed off the same dayKeys) makes day boundaries
+  // visible on the chart at a glance too.
+  const equityLabels = group.trades.map((t) => {
+    const d = new Date(t.date);
+    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return isMultiDay ? `${d.toLocaleDateString([], { weekday: "short" })} ${time}` : time;
+  });
   let cum = 0;
   const equityData = group.trades.map((t) => (cum += t.pnl));
   const perTradePnl = group.trades.map((t) => t.pnl);
@@ -163,7 +176,7 @@ export function buildRichReportHtml(
     // handled below via the empty-string fallback
   }
 
-  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, concurrentCounts }).replace(/</g, "\\u003c");
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, concurrentCounts, dayKeys }).replace(/</g, "\\u003c");
 
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
@@ -215,6 +228,37 @@ export function buildRichReportHtml(
     var d = ${dataJson};
     Chart.defaults.color = "#7F8CA6";
     Chart.defaults.font.family = "'Courier New', monospace";
+    // Alternates a faint background band each time dayKeys changes, so day
+    // boundaries are visible on the chart itself rather than only in the
+    // (now day-prefixed) axis labels — otherwise a multi-day chart reads as
+    // one undifferentiated line with repeating times like "07:37" showing
+    // up several times with no visual separation.
+    var dayBgPlugin = {
+      id: 'dayBg',
+      beforeDatasetsDraw: function(chart) {
+        var keys = d.dayKeys;
+        if (!keys || keys.length < 2) return;
+        var area = chart.chartArea;
+        var xScale = chart.scales.x;
+        var half = (xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) / 2;
+        var ctx = chart.ctx;
+        ctx.save();
+        var segStart = 0, toggle = 0;
+        for (var i = 1; i <= keys.length; i++) {
+          if (i === keys.length || keys[i] !== keys[segStart]) {
+            if (toggle % 2 === 1) {
+              var xStart = Math.max(area.left, xScale.getPixelForValue(segStart) - half);
+              var xEnd = Math.min(area.right, xScale.getPixelForValue(i - 1) + half);
+              ctx.fillStyle = 'rgba(127,140,166,0.08)';
+              ctx.fillRect(xStart, area.top, xEnd - xStart, area.bottom - area.top);
+            }
+            toggle++;
+            segStart = i;
+          }
+        }
+        ctx.restore();
+      }
+    };
     new Chart(document.getElementById('equityChart'), {
       type: 'line',
       data: {
@@ -228,6 +272,7 @@ export function buildRichReportHtml(
           pointBackgroundColor: d.perTradePnl.map(function(p) { return p >= 0 ? '#3FD0C9' : '#E5484D'; }),
         }]
       },
+      plugins: [dayBgPlugin],
       options: {
         plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
           var tradePnl = d.perTradePnl[ctx.dataIndex];

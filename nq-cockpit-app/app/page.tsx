@@ -2229,7 +2229,17 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
   }
 
   let cum = 0;
-  const equityLabels = items.map((t) => t.label);
+  const dayKeys = items.map((t) => (t.date ? tradingDayKey(new Date(t.date)) : null));
+  const isMultiDay = new Set(dayKeys.filter((k) => k !== null)).size > 1;
+  // When this chart spans more than one trading day (a weekly report), a
+  // bare time like "07:37 AM" is genuinely ambiguous — several different
+  // days can share the same clock time. Prefixing with a short weekday
+  // fixes that in the tooltip/axis labels themselves; the background
+  // shading below (keyed off the same dayKeys) makes day boundaries
+  // visible on the chart at a glance too.
+  const equityLabels = items.map((t) =>
+    isMultiDay && t.date ? `${new Date(t.date).toLocaleDateString([], { weekday: "short" })} ${t.label}` : t.label
+  );
   const equityData = items.map((t) => (cum += t.pnl));
   const perTradePnl = items.map((t) => t.pnl);
   const perTradeColors = perTradePnl.map((p) => (p >= 0 ? "#3FD0C9" : "#E5484D"));
@@ -2287,7 +2297,7 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
       });
   });
 
-  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts, concurrentEntryLabels }).replace(/</g, "\\u003c");
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts, concurrentEntryLabels, dayKeys }).replace(/</g, "\\u003c");
 
   return `
 <canvas id="equityChart" height="90"></canvas>
@@ -2304,6 +2314,38 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
   Chart.defaults.color = axisColor;
   Chart.defaults.font.family = "'Courier New', monospace";
 
+  // Alternates a faint background band each time dayKeys changes, so day
+  // boundaries are visible on the chart itself rather than only in the
+  // (now day-prefixed) axis labels — otherwise a multi-day chart reads as
+  // one undifferentiated line with repeating times like "07:37" showing
+  // up several times with no visual separation.
+  var dayBgPlugin = {
+    id: 'dayBg',
+    beforeDatasetsDraw: function(chart) {
+      var keys = d.dayKeys;
+      if (!keys || keys.length < 2) return;
+      var area = chart.chartArea;
+      var xScale = chart.scales.x;
+      var half = (xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) / 2;
+      var ctx = chart.ctx;
+      ctx.save();
+      var segStart = 0, toggle = 0;
+      for (var i = 1; i <= keys.length; i++) {
+        if (i === keys.length || keys[i] !== keys[segStart]) {
+          if (toggle % 2 === 1) {
+            var xStart = Math.max(area.left, xScale.getPixelForValue(segStart) - half);
+            var xEnd = Math.min(area.right, xScale.getPixelForValue(i - 1) + half);
+            ctx.fillStyle = 'rgba(127,140,166,0.08)';
+            ctx.fillRect(xStart, area.top, xEnd - xStart, area.bottom - area.top);
+          }
+          toggle++;
+          segStart = i;
+        }
+      }
+      ctx.restore();
+    }
+  };
+
   new Chart(document.getElementById('equityChart'), {
     type: 'line',
     data: {
@@ -2319,6 +2361,7 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
         pointBackgroundColor: d.perTradePnl.map(function(p) { return p >= 0 ? '#3FD0C9' : '#E5484D'; }),
       }]
     },
+    plugins: [dayBgPlugin],
     options: {
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
         var tradePnl = d.perTradePnl[ctx.dataIndex];
