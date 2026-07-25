@@ -2,19 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 import { tradingDayStart, tradingDayKey } from "@/lib/tradingWindow";
-
-// Same logic as holdTimeLabel in app/page.tsx — duplicated here since this
-// route can't import from a "use client" component.
-function holdTimeLabel(entryDate: Date | null, exitDate: Date): string | null {
-  if (!entryDate) return null;
-  const ms = exitDate.getTime() - entryDate.getTime();
-  if (!Number.isFinite(ms) || ms < 0) return null;
-  const mins = Math.round(ms / 60000);
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${h}h ${m}m`;
-}
+import { summarizeGroup, buildRichReportHtml, analyzeGroup, renderAnalysisHtml, holdTimeLabel } from "@/lib/serverReports";
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
@@ -30,13 +18,9 @@ export async function GET(req: NextRequest) {
   const now = new Date();
   // A "trading day" runs 6pm ET to 6pm ET the next day (CME Globex
   // convention), matching tradingDayKey/tradingDayStart used everywhere
-  // else in the app. Was previously the server's raw local timezone (UTC
-  // on Railway) at midnight — same class of bug fixed in the order route.
+  // else in the app.
   const startOfDay = tradingDayStart(now);
   const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
-  // startOfDay is a 6pm-ET-the-evening-before timestamp, so its raw
-  // .toDateString() would show the wrong (prior) calendar day — derive the
-  // actual trading-day label from the key instead.
   const tradingDayLabel = new Date(`${tradingDayKey(now)}T12:00:00`).toDateString();
 
   const trades = await prisma.trade.findMany({
@@ -45,18 +29,21 @@ export async function GET(req: NextRequest) {
   });
 
   // Best-effort: not every email client renders embedded base64 images
-  // (data URIs), but most modern ones (Gmail, Apple Mail) do.
+  // (data URIs), but most modern ones (Gmail, Apple Mail) do. This only
+  // matters for the plain-text body anyway now — the attachment is opened
+  // in a real browser, where this always works.
   const snapshots = await prisma.chartSnapshot.findMany({
     where: { date: { gte: startOfDay, lt: endOfDay } },
     orderBy: { date: "asc" },
   });
 
-  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
-  const wins = trades.filter((t) => t.pnl > 0).length;
-  const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0;
-  const clean = trades.filter((t) => t.disciplined === true).length;
-  const flagged = trades.filter((t) => t.disciplined === false).length;
-  const unrated = trades.length - clean - flagged;
+  const blockedLogs = await prisma.tradovateOrderLog.findMany({
+    where: { date: { gte: startOfDay, lt: endOfDay }, status: "BLOCKED" },
+    select: { blockedReason: true, date: true },
+  });
+
+  const group = summarizeGroup(tradingDayLabel, trades);
+  const analysis = analyzeGroup(group, blockedLogs);
 
   const rows = trades
     .map(
@@ -75,16 +62,20 @@ export async function GET(req: NextRequest) {
     )
     .join("");
 
+  // Email BODY stays plain HTML with no <script> — most email clients
+  // strip scripts entirely, so the interactive equity chart only lives in
+  // the attached report (opened in a real browser), not here.
   const html = `
     <div style="font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;border-radius:8px;">
       <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Daily Report</h2>
       <p style="color:#7F8CA6;margin:0 0 16px;">${tradingDayLabel}</p>
-      <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;">
-        <div><strong>P&amp;L:</strong> ${totalPnl >= 0 ? "$" : "-$"}${Math.abs(totalPnl).toFixed(2)}</div>
+      <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;flex-wrap:wrap;">
+        <div><strong>P&amp;L:</strong> ${group.pnl >= 0 ? "$" : "-$"}${Math.abs(group.pnl).toFixed(2)}</div>
         <div><strong>Trades:</strong> ${trades.length}</div>
-        <div><strong>Win rate:</strong> ${winRate}%</div>
-        <div><strong>Clean/Flagged${unrated ? "/Unrated" : ""}:</strong> ${clean}/${flagged}${unrated ? "/" + unrated : ""}</div>
+        <div><strong>Win rate:</strong> ${group.winRate}%</div>
+        <div><strong>Clean/Flagged${group.unrated ? "/Unrated" : ""}:</strong> ${group.clean}/${group.flagged}${group.unrated ? "/" + group.unrated : ""}</div>
       </div>
+      ${renderAnalysisHtml(analysis)}
       ${
         trades.length
           ? `<table style="border-collapse:collapse;width:100%;font-size:13px;">
@@ -103,25 +94,22 @@ export async function GET(req: NextRequest) {
             </table>`
           : `<p style="color:#7F8CA6;">No trades logged today.</p>`
       }
-      ${
-        snapshots.length
-          ? `<h3 style="color:#3FD0C9;font-size:15px;margin:20px 0 8px;">Chart Snapshots</h3>
-             <div style="display:flex;flex-wrap:wrap;gap:12px;">
-               ${snapshots.map((s) => `
-               <div style="width:280px;">
-                 <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
-                 <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` — ${s.note}` : ""}</div>
-               </div>`).join("")}
-             </div>`
-          : ""
-      }
+      <p style="color:#7F8CA6;font-size:12px;margin-top:16px;">Full report with charts and any chart snapshots is attached as an HTML file — open it in a browser for the interactive version.</p>
     </div>
   `;
 
+  const reportHtml = buildRichReportHtml(group, snapshots, "Daily");
+
   await sendEmail({
     to,
-    subject: `NQ Cockpit — ${trades.length} trade(s), ${totalPnl >= 0 ? "+" : "-"}$${Math.abs(totalPnl).toFixed(2)} — ${tradingDayLabel}`,
+    subject: `NQ Cockpit — ${trades.length} trade(s), ${group.pnl >= 0 ? "+" : "-"}$${Math.abs(group.pnl).toFixed(2)} — ${tradingDayLabel}`,
     html,
+    attachments: [
+      {
+        filename: `nq-cockpit-daily-report-${tradingDayKey(now)}.html`,
+        content: Buffer.from(reportHtml, "utf-8").toString("base64"),
+      },
+    ],
   });
 
   return NextResponse.json({ ok: true, tradesCount: trades.length });

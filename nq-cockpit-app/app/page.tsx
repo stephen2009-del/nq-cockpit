@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
-import { getTradingWindowStatus, tradingDayKey } from "@/lib/tradingWindow";
+import { getTradingWindowStatus, tradingDayKey, weekStartKey } from "@/lib/tradingWindow";
 import { matchFillsToTrades, MatchedTrade, analyzeHoldTimes } from "@/lib/fifoMatch";
 
 type Rule = { id: number; text: string; order: number };
@@ -3506,31 +3506,8 @@ function groupTradesByDay(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
-// A "trading week" runs Sunday 6pm ET (Globex's weekly reopen) through
-// Friday 1pm ET — not the standard Mon-Fri calendar week. Returns the
-// Sunday calendar date (ET, as "YYYY-MM-DD") that started the week
-// containing the given timestamp, so trades/snapshots can be grouped the
-// same way groupTradesByDay groups by trading day. Anything technically
-// logged in the Fri-1pm-to-Sun-6pm gap (when nothing should be trading
-// anyway) falls back to the week that's ending rather than the one about
-// to start — a reasonable default for what should be an empty case.
-function weekStartKey(date: Date): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false, weekday: "short",
-  }).formatToParts(date);
-  const y = parseInt(parts.find((p) => p.type === "year")!.value, 10);
-  const m = parseInt(parts.find((p) => p.type === "month")!.value, 10);
-  const d = parseInt(parts.find((p) => p.type === "day")!.value, 10);
-  let hour = parseInt(parts.find((p) => p.type === "hour")!.value, 10);
-  if (hour === 24) hour = 0;
-  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  const weekdayIdx = weekdayMap[parts.find((p) => p.type === "weekday")!.value] ?? 0;
-  const dayDate = new Date(Date.UTC(y, m - 1, d));
-  const daysBack = weekdayIdx === 0 && hour < 18 ? 7 : weekdayIdx;
-  dayDate.setUTCDate(dayDate.getUTCDate() - daysBack);
-  return dayDate.toISOString().slice(0, 10);
-}
+// weekStartKey now lives in lib/tradingWindow.ts (shared with the
+// server-side weekly-report cron) — imported at the top of this file.
 
 function groupTradesByWeek(trades: Trade[]) {
   const map = new Map<string, Trade[]>();

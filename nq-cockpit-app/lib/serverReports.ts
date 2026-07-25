@@ -1,0 +1,379 @@
+import fs from "fs";
+import path from "path";
+
+// Mirrors the `Trade` shape from the Prisma model — duplicated here rather
+// than imported from app/page.tsx since that's a "use client" component and
+// this runs server-side in cron routes (same convention already used for
+// holdTimeLabel in the daily-report route before this file existed).
+export type ServerTrade = {
+  id: number;
+  date: Date;
+  symbol: string;
+  dir: string;
+  entry: number | null;
+  exit: number | null;
+  entryDate: Date | null;
+  size: number | null;
+  pnl: number;
+  disciplined: boolean | null;
+  emotion: string | null;
+  source: string;
+};
+
+export function holdTimeLabel(entryDate: Date | null, exitDate: Date): string | null {
+  if (!entryDate) return null;
+  const ms = exitDate.getTime() - entryDate.getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
+type AddOnInstance = { earlier: ServerTrade; later: ServerTrade };
+
+// Same overlap logic as the client-side detectors in app/page.tsx: a
+// "later" trade counts as adding to an "adverse"/"favorable" earlier
+// position if it entered while that earlier position (same symbol, same
+// direction) was still open, at a price that made things worse/better.
+function findAddOnInstances(trades: ServerTrade[], favorable: boolean): AddOnInstance[] {
+  const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
+  const results: AddOnInstance[] = [];
+  for (const later of withEntry) {
+    let best: ServerTrade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of withEntry) {
+      if (earlier.id === later.id) continue;
+      if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
+      const earlierEntry = new Date(earlier.entryDate!).getTime();
+      const earlierExit = new Date(earlier.date).getTime();
+      const laterEntry = new Date(later.entryDate!).getTime();
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const isFavorable = earlier.dir === "long" ? later.entry! > earlier.entry! : later.entry! < earlier.entry!;
+      if (isFavorable !== favorable) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
+    }
+    if (best) results.push({ earlier: best, later });
+  }
+  return results;
+}
+
+export const findAddedToLoserInstances = (trades: ServerTrade[]) => findAddOnInstances(trades, false);
+export const findAddedToWinnerInstances = (trades: ServerTrade[]) => findAddOnInstances(trades, true);
+
+// Concurrent-trade count for the equity-curve tooltip, same definition as
+// the client's ExpectedMoveTracker-adjacent chart code: counts itself, so 1
+// means never stacked with anything else. Symbol/direction-agnostic —
+// holding an NQ long and an MNQ short at once is still 2 concurrent trades.
+function concurrentCount(trades: ServerTrade[], t: ServerTrade): number | null {
+  if (!t.entryDate) return null;
+  const entryI = new Date(t.entryDate).getTime();
+  const exitI = new Date(t.date).getTime();
+  let count = 0;
+  for (const other of trades) {
+    if (!other.entryDate) continue;
+    const entryJ = new Date(other.entryDate).getTime();
+    const exitJ = new Date(other.date).getTime();
+    if (entryI < exitJ && entryJ < exitI) count++;
+  }
+  return count;
+}
+
+export type ReportGroup = {
+  label: string; // e.g. "Thu Jul 23 2026" or "Week of Jul 19 - Jul 24, 2026"
+  trades: ServerTrade[];
+  pnl: number;
+  winRate: number;
+  clean: number;
+  flagged: number;
+  unrated: number;
+};
+
+export function summarizeGroup(label: string, trades: ServerTrade[]): ReportGroup {
+  const pnl = trades.reduce((s, t) => s + t.pnl, 0);
+  const wins = trades.filter((t) => t.pnl > 0).length;
+  const clean = trades.filter((t) => t.disciplined === true).length;
+  const flagged = trades.filter((t) => t.disciplined === false).length;
+  const unrated = trades.length - clean - flagged;
+  return {
+    label,
+    trades,
+    pnl,
+    winRate: trades.length ? Math.round((wins / trades.length) * 100) : 0,
+    clean,
+    flagged,
+    unrated,
+  };
+}
+
+function fmtMoney(n: number): string {
+  return `${n >= 0 ? "$" : "-$"}${Math.abs(n).toFixed(2)}`;
+}
+
+// Builds the same rich report as the Reports tab's Download HTML button —
+// full trade table (with Symbol column), red/green highlighted rows for
+// loser/winner adds, the callout boxes naming each instance, chart
+// snapshots, and a self-contained equity curve (Chart.js embedded directly
+// from this app's own /public/vendor folder via fs, not a CDN — same reason
+// as the client version: doesn't depend on any external network request
+// once the recipient opens the attachment).
+export function buildRichReportHtml(
+  group: ReportGroup,
+  snapshots: { date: Date; note: string | null; imageData: string }[],
+  reportLabel: string
+): string {
+  const addedToLoser = findAddedToLoserInstances(group.trades);
+  const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+  const addedToWinner = findAddedToWinnerInstances(group.trades);
+  const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
+
+  const rows = group.trades
+    .map(
+      (t) => `
+    <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : winnerIds.has(t.id) ? ' style="background:rgba(63,208,201,0.15);"' : ""}>
+      <td>${laterIds.has(t.id) ? "!" : winnerIds.has(t.id) ? "+" : ""}</td>
+      <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${t.symbol}</td>
+      <td>${t.source.toUpperCase()}</td>
+      <td>${t.dir.toUpperCase()}</td>
+      <td>${t.entry !== null ? t.entry : "-"}</td>
+      <td>${t.exit !== null ? t.exit : "-"}</td>
+      <td>${holdTimeLabel(t.entryDate, t.date) ?? "-"}</td>
+      <td style="color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${fmtMoney(t.pnl)}</td>
+      <td>${t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</td>
+      <td>${t.emotion || "-"}</td>
+    </tr>`
+    )
+    .join("");
+
+  const equityLabels = group.trades.map((t) => new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  let cum = 0;
+  const equityData = group.trades.map((t) => (cum += t.pnl));
+  const perTradePnl = group.trades.map((t) => t.pnl);
+  const concurrentCounts = group.trades.map((t) => concurrentCount(group.trades, t));
+
+  let chartJsSource = "";
+  try {
+    chartJsSource = fs.readFileSync(path.join(process.cwd(), "public/vendor/chart.umd.min.js"), "utf-8");
+  } catch {
+    // handled below via the empty-string fallback
+  }
+
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, concurrentCounts }).replace(/</g, "\\u003c");
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<style>
+  body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;}
+  h1{color:#F5A623;font-size:20px;margin:0 0 4px;}
+  .sub{color:#7F8CA6;margin:0 0 16px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:20px;}
+  th{text-align:left;padding:6px 10px;color:#7F8CA6;border-bottom:1px solid #263654;}
+  td{padding:6px 10px;border-bottom:1px solid #1a2540;}
+  .callout{border-radius:6px;padding:12px 14px;margin-bottom:16px;font-size:13px;}
+  .callout-loser{border:1px solid #E5484D;background:rgba(229,72,77,0.08);}
+  .callout-winner{border:1px solid #3FD0C9;background:rgba(63,208,201,0.08);}
+  .callout-line{color:#7F8CA6;margin-top:4px;}
+</style>
+</head>
+<body>
+  <h1>NQ COCKPIT — ${reportLabel} Report</h1>
+  <p class="sub">${group.label}</p>
+  <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;">
+    <div><strong>P&amp;L:</strong> ${fmtMoney(group.pnl)}</div>
+    <div><strong>Trades:</strong> ${group.trades.length}</div>
+    <div><strong>Win rate:</strong> ${group.winRate}%</div>
+    <div><strong>Clean/Flagged${group.unrated ? "/Unrated" : ""}:</strong> ${group.clean}/${group.flagged}${group.unrated ? "/" + group.unrated : ""}</div>
+  </div>
+  ${addedToLoser.length > 0 ? `
+  <div class="callout callout-loser">
+    <div style="font-weight:bold;margin-bottom:6px;">! Added to a losing position — ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
+    ${addedToLoser.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.</div>`).join("")}
+  </div>` : ""}
+  ${addedToWinner.length > 0 ? `
+  <div class="callout callout-winner">
+    <div style="font-weight:bold;margin-bottom:6px;">+ Added to a winning position — ${addedToWinner.length} instance${addedToWinner.length === 1 ? "" : "s"}</div>
+    ${addedToWinner.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.</div>`).join("")}
+  </div>` : ""}
+  ${group.trades.length
+      ? `<table>
+          <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`
+      : `<p style="color:#7F8CA6;">No trades logged.</p>`
+    }
+  ${group.trades.length && chartJsSource ? `
+  <h3 style="color:#3FD0C9;font-size:15px;margin:0 0 8px;">Equity Curve</h3>
+  <div style="max-width:800px;margin-bottom:20px;"><canvas id="equityChart" height="280"></canvas></div>
+  <script>${chartJsSource}</script>
+  <script>
+  (function() {
+    var d = ${dataJson};
+    Chart.defaults.color = "#7F8CA6";
+    Chart.defaults.font.family = "'Courier New', monospace";
+    new Chart(document.getElementById('equityChart'), {
+      type: 'line',
+      data: {
+        labels: d.equityLabels,
+        datasets: [{
+          label: 'Cumulative Realized P&L',
+          data: d.equityData,
+          borderColor: d.equityData[d.equityData.length - 1] >= 0 ? '#3FD0C9' : '#E5484D',
+          backgroundColor: 'rgba(63,208,201,0.08)',
+          fill: true, tension: 0.15, pointRadius: 3,
+          pointBackgroundColor: d.perTradePnl.map(function(p) { return p >= 0 ? '#3FD0C9' : '#E5484D'; }),
+        }]
+      },
+      options: {
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
+          var tradePnl = d.perTradePnl[ctx.dataIndex];
+          var concurrent = d.concurrentCounts[ctx.dataIndex];
+          var lines = ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
+          lines.push(concurrent === null ? 'Concurrent trades: unknown' : 'Concurrent trades: ' + concurrent);
+          return lines;
+        } } } },
+        scales: { x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: '#263654' } }, y: { grid: { color: '#263654' } } }
+      }
+    });
+  })();
+  </script>` : ""}
+  ${snapshots.length ? `
+  <h3 style="color:#3FD0C9;font-size:15px;margin:20px 0 8px;">Chart Snapshots</h3>
+  <div style="display:flex;flex-wrap:wrap;gap:12px;">
+    ${snapshots.map((s) => `
+    <div style="width:280px;">
+      <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
+      <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` — ${s.note}` : ""}</div>
+    </div>`).join("")}
+  </div>` : ""}
+</body></html>`;
+}
+
+// ---- Deterministic discipline analysis ----
+// Rule-based on purpose: this feeds an unattended, automated email with no
+// human review before it goes out. A rule engine gives numbers you can
+// trust are actually in the data (every claim below is computed directly
+// from the trades/logs passed in) rather than risking a generative model
+// paraphrasing or misstating a specific price/time in an email you might
+// act on. Mirrors the kind of analysis given conversationally elsewhere in
+// this app's development, just codified into thresholds.
+export type AnalysisResult = { good: string[]; watch: string[] };
+
+export function analyzeGroup(
+  group: ReportGroup,
+  blockedLogs: { blockedReason: string | null; date: Date }[]
+): AnalysisResult {
+  const good: string[] = [];
+  const watch: string[] = [];
+
+  if (group.trades.length === 0) {
+    return { good: [], watch: [] };
+  }
+
+  const addedToLoser = findAddedToLoserInstances(group.trades);
+  const addedToWinner = findAddedToWinnerInstances(group.trades);
+
+  // Win rate / P&L framing
+  if (group.pnl >= 0) {
+    good.push(`Finished positive at ${fmtMoney(group.pnl)} across ${group.trades.length} trade(s), ${group.winRate}% win rate.`);
+  } else {
+    watch.push(`Finished negative at ${fmtMoney(group.pnl)} across ${group.trades.length} trade(s), ${group.winRate}% win rate.`);
+  }
+
+  // Discipline checklist usage
+  if (group.unrated === group.trades.length) {
+    watch.push(`0 of ${group.trades.length} trades went through the Pre-Trade discipline checklist — no self-rated data at all to learn from beyond raw P&L.`);
+  } else if (group.flagged === 0 && group.clean > 0) {
+    good.push(`${group.clean} trade(s) rated CLEAN, 0 flagged.`);
+  } else if (group.flagged > 0) {
+    watch.push(`${group.flagged} trade(s) self-flagged as undisciplined.`);
+  }
+
+  // Added-to-loser / added-to-winner
+  if (addedToLoser.length === 0) {
+    good.push(`No instances of adding to an already-open losing position.`);
+  } else {
+    const longCount = addedToLoser.filter((i) => i.earlier.dir === "long").length;
+    const shortCount = addedToLoser.length - longCount;
+    const gaps = addedToLoser
+      .filter((i) => i.earlier.entryDate && i.later.entryDate)
+      .map((i) => (new Date(i.later.entryDate!).getTime() - new Date(i.earlier.entryDate!).getTime()) / 60000);
+    const medianGap = gaps.length ? [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
+    watch.push(
+      `${addedToLoser.length} instance(s) of adding to a losing position (${longCount} long / ${shortCount} short)` +
+      (medianGap !== null ? `, median ${medianGap < 1 ? "under 1 minute" : `${Math.round(medianGap)} minute(s)`} between the original entry and the add.` : ".")
+    );
+  }
+  if (addedToWinner.length > 0) {
+    good.push(`${addedToWinner.length} instance(s) of adding to an already-open winning position (pyramiding a winner).`);
+  }
+
+  // Max concurrent stacking observed
+  const maxConcurrent = Math.max(0, ...group.trades.map((t) => concurrentCount(group.trades, t) ?? 0));
+  if (maxConcurrent >= 4) {
+    watch.push(`Peak concurrency reached ${maxConcurrent} overlapping open trades at once.`);
+  } else if (maxConcurrent > 0) {
+    good.push(`Peak concurrency stayed at ${maxConcurrent} — never heavily stacked.`);
+  }
+
+  // Hold-time asymmetry between winners and losers
+  const holdMinutes = (t: ServerTrade) => {
+    if (!t.entryDate) return null;
+    const m = (new Date(t.date).getTime() - new Date(t.entryDate).getTime()) / 60000;
+    return Number.isFinite(m) && m >= 0 ? m : null;
+  };
+  const winnerHolds = group.trades.filter((t) => t.pnl > 0).map(holdMinutes).filter((m): m is number => m !== null);
+  const loserHolds = group.trades.filter((t) => t.pnl <= 0).map(holdMinutes).filter((m): m is number => m !== null);
+  if (winnerHolds.length > 0 && loserHolds.length > 0) {
+    const avgWin = winnerHolds.reduce((s, m) => s + m, 0) / winnerHolds.length;
+    const avgLoss = loserHolds.reduce((s, m) => s + m, 0) / loserHolds.length;
+    if (avgLoss > avgWin * 1.5) {
+      watch.push(`Losing trades were held ~${avgLoss.toFixed(0)}m on average vs. ~${avgWin.toFixed(0)}m for winners — losers ran longer than winners were allowed to.`);
+    } else {
+      good.push(`Hold times were roughly even between winners (~${avgWin.toFixed(0)}m avg) and losers (~${avgLoss.toFixed(0)}m avg) — no sign of cutting winners short while letting losers run.`);
+    }
+  }
+
+  // Guard interventions — did the hard blocks actually fire?
+  const relevantBlocks = blockedLogs.filter((l) => l.blockedReason);
+  if (relevantBlocks.length > 0) {
+    const cooldownBlocks = relevantBlocks.filter((l) => l.blockedReason!.includes("cooldown")).length;
+    const concurrencyBlocks = relevantBlocks.filter((l) => l.blockedReason!.includes("concurrent")).length;
+    const fatFingerBlocks = relevantBlocks.filter((l) => l.blockedReason!.includes("data-entry error")).length;
+    const lossGuardBlocks = relevantBlocks.length - cooldownBlocks - concurrencyBlocks - fatFingerBlocks;
+    const parts: string[] = [];
+    if (concurrencyBlocks) parts.push(`${concurrencyBlocks} blocked for exceeding the concurrent-adds cap`);
+    if (cooldownBlocks) parts.push(`${cooldownBlocks} blocked for being inside the add-on cooldown`);
+    if (fatFingerBlocks) parts.push(`${fatFingerBlocks} blocked as a likely fat-finger price`);
+    if (lossGuardBlocks > 0) parts.push(`${lossGuardBlocks} blocked by another guard (losing-position/trading-window/lockout)`);
+    good.push(`The order guards actually intervened this period: ${parts.join(", ")}.`);
+  }
+
+  return { good, watch };
+}
+
+export function renderAnalysisHtml(analysis: AnalysisResult): string {
+  if (analysis.good.length === 0 && analysis.watch.length === 0) return "";
+  return `
+    <div style="margin-bottom:20px;">
+      ${analysis.good.length ? `
+      <div style="margin-bottom:12px;">
+        <div style="color:#3FD0C9;font-weight:bold;margin-bottom:6px;">What went well</div>
+        <ul style="margin:0;padding-left:20px;color:#E8EDF5;">
+          ${analysis.good.map((g) => `<li style="margin-bottom:4px;">${g}</li>`).join("")}
+        </ul>
+      </div>` : ""}
+      ${analysis.watch.length ? `
+      <div>
+        <div style="color:#F5A623;font-weight:bold;margin-bottom:6px;">Worth a closer look</div>
+        <ul style="margin:0;padding-left:20px;color:#E8EDF5;">
+          ${analysis.watch.map((w) => `<li style="margin-bottom:4px;">${w}</li>`).join("")}
+        </ul>
+      </div>` : ""}
+    </div>
+  `;
+}

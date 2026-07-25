@@ -2,10 +2,12 @@ export async function sendEmail({
   to,
   subject,
   html,
+  attachments,
 }: {
   to: string;
   subject: string;
   html: string;
+  attachments?: { filename: string; content: string }[]; // content is base64
 }) {
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -18,6 +20,7 @@ export async function sendEmail({
       to,
       subject,
       html,
+      ...(attachments && attachments.length ? { attachments } : {}),
     }),
   });
   if (!res.ok) {

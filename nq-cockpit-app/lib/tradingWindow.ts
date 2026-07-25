@@ -41,6 +41,42 @@ export type TradingWindowSettings = {
 
 // Returns a stable "YYYY-MM-DD" key for grouping/comparing which trading
 // day a given timestamp falls into.
+// A "trading week" runs Sunday 6pm ET (Globex's weekly reopen) through
+// Friday 1pm ET — not the standard Mon-Fri calendar week. Returns the
+// Sunday calendar date (ET, as "YYYY-MM-DD") that started the week
+// containing the given timestamp, same style as tradingDayKey above.
+// Shared between the client Reports tab and the server-side weekly-report
+// cron, rather than duplicated — unlike tradingDayKey/tradingDayStart's
+// usual pattern of being re-implemented per-route, this one's identical
+// logic in both places so it lives in one spot.
+export function weekStartKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false, weekday: "short",
+  }).formatToParts(date);
+  const y = parseInt(parts.find((p) => p.type === "year")!.value, 10);
+  const m = parseInt(parts.find((p) => p.type === "month")!.value, 10);
+  const d = parseInt(parts.find((p) => p.type === "day")!.value, 10);
+  let hour = parseInt(parts.find((p) => p.type === "hour")!.value, 10);
+  if (hour === 24) hour = 0;
+  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const weekdayIdx = weekdayMap[parts.find((p) => p.type === "weekday")!.value] ?? 0;
+  const dayDate = new Date(Date.UTC(y, m - 1, d));
+  const daysBack = weekdayIdx === 0 && hour < 18 ? 7 : weekdayIdx;
+  dayDate.setUTCDate(dayDate.getUTCDate() - daysBack);
+  return dayDate.toISOString().slice(0, 10);
+}
+
+// The actual UTC instant of the Sunday-6pm-ET rollover that started the
+// trading week containing `now` — for server-side date-range queries,
+// mirroring tradingDayStart's role for a single day.
+export function weekStart(now: Date = new Date()): Date {
+  const key = weekStartKey(now);
+  const [y, m, d] = key.split("-").map(Number);
+  const offset = getEtOffsetString(new Date(Date.UTC(y, m - 1, d)));
+  return new Date(`${key}T18:00:00${offset}`);
+}
+
 export function tradingDayKey(date: Date): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
