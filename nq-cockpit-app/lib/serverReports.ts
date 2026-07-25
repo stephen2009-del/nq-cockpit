@@ -467,10 +467,11 @@ ${JSON.stringify(facts)}`;
     // the model room to run long) can hang the fetch indefinitely, which
     // hangs the ENTIRE cron request (the email never gets sent at all,
     // not even the fallback) rather than just this one section failing.
-    // 25s gives real responses plenty of room while still failing fast
-    // enough to fall back and let the email go out on schedule.
+    // 55s gives real responses plenty of room (25s proved too tight for a
+    // busy 60-trade week in testing) while still failing fast enough to
+    // fall back and let the email go out on schedule.
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
+    const timeout = setTimeout(() => controller.abort(), 55000);
     let res: Response;
     try {
       res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -517,7 +518,7 @@ ${JSON.stringify(facts)}`;
     return { good: parsed.good, watch: parsed.watch };
   } catch (err: any) {
     if (err.name === "AbortError") {
-      console.error("[AI-ANALYSIS] Anthropic API call timed out after 25s, falling back to deterministic.");
+      console.error("[AI-ANALYSIS] Anthropic API call timed out after 55s, falling back to deterministic.");
     } else {
       console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
     }
