@@ -3501,7 +3501,64 @@ function groupTradesByDay(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
-async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = []): Promise<string> {
+// A "trading week" runs Sunday 6pm ET (Globex's weekly reopen) through
+// Friday 1pm ET — not the standard Mon-Fri calendar week. Returns the
+// Sunday calendar date (ET, as "YYYY-MM-DD") that started the week
+// containing the given timestamp, so trades/snapshots can be grouped the
+// same way groupTradesByDay groups by trading day. Anything technically
+// logged in the Fri-1pm-to-Sun-6pm gap (when nothing should be trading
+// anyway) falls back to the week that's ending rather than the one about
+// to start — a reasonable default for what should be an empty case.
+function weekStartKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false, weekday: "short",
+  }).formatToParts(date);
+  const y = parseInt(parts.find((p) => p.type === "year")!.value, 10);
+  const m = parseInt(parts.find((p) => p.type === "month")!.value, 10);
+  const d = parseInt(parts.find((p) => p.type === "day")!.value, 10);
+  let hour = parseInt(parts.find((p) => p.type === "hour")!.value, 10);
+  if (hour === 24) hour = 0;
+  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const weekdayIdx = weekdayMap[parts.find((p) => p.type === "weekday")!.value] ?? 0;
+  const dayDate = new Date(Date.UTC(y, m - 1, d));
+  const daysBack = weekdayIdx === 0 && hour < 18 ? 7 : weekdayIdx;
+  dayDate.setUTCDate(dayDate.getUTCDate() - daysBack);
+  return dayDate.toISOString().slice(0, 10);
+}
+
+function groupTradesByWeek(trades: Trade[]) {
+  const map = new Map<string, Trade[]>();
+  trades.forEach((t) => {
+    const key = weekStartKey(new Date(t.date));
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(t);
+  });
+  return Array.from(map.entries())
+    .map(([dateStr, weekTrades]) => {
+      const pnl = weekTrades.reduce((s, t) => s + t.pnl, 0);
+      const wins = weekTrades.filter((t) => t.pnl > 0).length;
+      const clean = weekTrades.filter((t) => t.disciplined === true).length;
+      const flagged = weekTrades.filter((t) => t.disciplined === false).length;
+      const unrated = weekTrades.filter((t) => t.disciplined === null).length;
+      const sunday = new Date(`${dateStr}T12:00:00`);
+      const friday = new Date(sunday.getTime() + 5 * 24 * 60 * 60 * 1000);
+      const displayLabel = `Week of ${sunday.toLocaleDateString([], { month: "short", day: "numeric" })} – ${friday.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}`;
+      return {
+        dateStr,
+        displayLabel,
+        trades: weekTrades,
+        pnl,
+        winRate: Math.round((wins / weekTrades.length) * 100),
+        clean,
+        flagged,
+        unrated,
+      };
+    })
+    .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
+}
+
+async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], reportLabel: string = "Daily"): Promise<string> {
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   const addedToWinner = findAddedToWinnerInstances(day.trades);
@@ -3542,7 +3599,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
   td{padding:6px 10px;border-bottom:1px solid #263654;}
 </style></head>
 <body>
-  <h1>NQ COCKPIT — Daily Report</h1>
+  <h1>NQ COCKPIT — ${reportLabel} Report</h1>
   <p class="sub">${day.displayLabel}</p>
   <div class="stats">
     <div><strong>P&amp;L:</strong> ${fmtMoney(day.pnl)}</div>
@@ -3579,7 +3636,7 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
 </body></html>`;
 }
 
-async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all") {
+async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all", reportLabel: string = "Daily") {
   const doc = new jsPDF({ orientation: "landscape" });
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
@@ -3588,7 +3645,7 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
   let y = 20;
   doc.setFont("courier", "bold");
   doc.setFontSize(16);
-  doc.text("NQ COCKPIT — Daily Report", 14, y);
+  doc.text(`NQ COCKPIT — ${reportLabel} Report`, 14, y);
   y += 8;
   doc.setFontSize(10);
   doc.setFont("courier", "normal");
@@ -3699,7 +3756,7 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
     }
   }
 
-  doc.save(`nq-cockpit-report-${envLabel}-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
+  doc.save(`nq-cockpit-${reportLabel.toLowerCase()}-report-${envLabel}-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
 function formatHourLabel(h: number): string {
@@ -3827,6 +3884,7 @@ function AddOnPatternsPanel({ days }: { days: ReturnType<typeof groupTradesByDay
 function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; settings: Settings }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">(settings.tradovateEnv === "live" ? "live" : "demo");
+  const [reportView, setReportView] = useState<"daily" | "weekly">("daily");
   // Settings is the single source of truth for which environment you're
   // looking at — whenever it changes elsewhere in the app, this follows
   // automatically instead of silently staying on whatever was last picked
@@ -3837,30 +3895,53 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
   }, [settings.tradovateEnv]);
   const filteredTrades = envFilter === "all" ? trades : trades.filter((t) => t.source === envFilter);
   const days = groupTradesByDay(filteredTrades);
+  // Weeks run Sunday 6pm ET (Globex's weekly reopen) through Friday 1pm ET —
+  // not the standard Mon-Fri calendar week — matching how this account
+  // actually thinks about a trading week.
+  const weeks = groupTradesByWeek(filteredTrades);
+  const groups = reportView === "daily" ? days : weeks;
 
   return (
     <div className="panel-box">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
-          <div className="panel-title" style={{ marginBottom: 2 }}>Daily Reports</div>
-          <div className="panel-desc" style={{ marginBottom: 0 }}>Same numbers as your daily email, browsable here — plus a PDF download for any day.</div>
+          <div className="panel-title" style={{ marginBottom: 2 }}>{reportView === "daily" ? "Daily Reports" : "Weekly Reports"}</div>
+          <div className="panel-desc" style={{ marginBottom: 0 }}>{reportView === "daily" ? "Same numbers as your daily email, browsable here — plus a PDF download for any day." : "Every day rolled into one report per trading week (Sun 6pm ET – Fri 1pm ET)."}</div>
         </div>
-        <select value={envFilter} onChange={(e) => setEnvFilter(e.target.value as "all" | "live" | "demo")}>
-          <option value="all">All accounts</option>
-          <option value="live">Live only</option>
-          <option value="demo">Demo only</option>
-        </select>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden" }}>
+            <button
+              className="btn small ghost"
+              style={{ borderRadius: 0, background: reportView === "daily" ? "var(--panel-2)" : undefined, color: reportView === "daily" ? "var(--cyan)" : undefined }}
+              onClick={() => setReportView("daily")}
+            >
+              Daily
+            </button>
+            <button
+              className="btn small ghost"
+              style={{ borderRadius: 0, background: reportView === "weekly" ? "var(--panel-2)" : undefined, color: reportView === "weekly" ? "var(--cyan)" : undefined }}
+              onClick={() => setReportView("weekly")}
+            >
+              Weekly
+            </button>
+          </div>
+          <select value={envFilter} onChange={(e) => setEnvFilter(e.target.value as "all" | "live" | "demo")}>
+            <option value="all">All accounts</option>
+            <option value="live">Live only</option>
+            <option value="demo">Demo only</option>
+          </select>
+        </div>
       </div>
       <AddOnPatternsPanel days={days} />
-      {days.length === 0 ? (
+      {groups.length === 0 ? (
         <div className="empty-state" style={{ marginTop: 12 }}><div className="big">🗒️</div>No trades logged for this filter yet.</div>
       ) : (
-        days.map((day) => {
+        groups.map((day) => {
         const addedToLoser = findAddedToLoserInstances(day.trades);
         const laterIds = new Set(addedToLoser.map((i) => i.later.id));
         const addedToWinner = findAddedToWinnerInstances(day.trades);
         const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
-        const daySnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === day.dateStr);
+        const daySnapshots = snapshots.filter((s) => (reportView === "daily" ? tradingDayKey(new Date(s.date)) === day.dateStr : weekStartKey(new Date(s.date)) === day.dateStr));
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
@@ -3883,7 +3964,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
               onClick={(e) => {
                 e.stopPropagation();
                 const win = window.open("", "_blank");
-                buildDayReportHtml(day, daySnapshots).then((html) => {
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly").then((html) => {
                   if (!win) return;
                   const blob = new Blob([html], { type: "text/html" });
                   win.location.href = URL.createObjectURL(blob);
@@ -3896,12 +3977,12 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
               className="btn small ghost"
               onClick={(e) => {
                 e.stopPropagation();
-                buildDayReportHtml(day, daySnapshots).then((html) => {
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly").then((html) => {
                   const blob = new Blob([html], { type: "text/html" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
                   a.href = url;
-                  a.download = `nq-cockpit-report-${envFilter}-${day.dateStr.replace(/\s+/g, "-")}.html`;
+                  a.download = `nq-cockpit-${reportView}-report-${envFilter}-${day.dateStr.replace(/\s+/g, "-")}.html`;
                   document.body.appendChild(a);
                   a.click();
                   document.body.removeChild(a);
@@ -3911,7 +3992,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
             >
               Download HTML
             </button>
-            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter); }}>Download PDF</button>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter, reportView === "daily" ? "Daily" : "Weekly"); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
