@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "REPORT_EMAIL is not set" }, { status: 500 });
   }
 
-  // Which account(s) this report covers. Defaults to whatever Settings'
+  // Which account(s) this report covers.
   // Defaults to Live specifically — not Settings' current environment,
   // since that toggle changes whenever you're testing something in Demo,
   // and the automated report shouldn't silently follow that. Override
@@ -42,6 +42,16 @@ export async function GET(req: NextRequest) {
   const startOfDay = tradingDayStart(now);
   const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
   const tradingDayLabel = new Date(`${tradingDayKey(now)}T12:00:00`).toDateString();
+
+  // A trading day (6pm ET–6pm ET) that falls on a calendar Saturday or
+  // Sunday is always fully inside Globex's weekend closure (last close
+  // ~5pm ET Friday, reopen ~6pm ET Sunday) — there's no scenario where
+  // that window has real trades. Skip sending rather than mail an
+  // always-empty $0.00/0-trades report every weekend.
+  const dayOfWeek = new Date(`${tradingDayKey(now)}T12:00:00`).getDay(); // 0=Sun, 6=Sat
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    return NextResponse.json({ ok: true, skipped: true, reason: "weekend — market closed" });
+  }
 
   const trades = await prisma.trade.findMany({
     where: { date: { gte: startOfDay, lt: endOfDay }, ...sourceWhere },
