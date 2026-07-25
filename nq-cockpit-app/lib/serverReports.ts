@@ -377,3 +377,121 @@ export function renderAnalysisHtml(analysis: AnalysisResult): string {
     </div>
   `;
 }
+
+// ---- AI-generated discipline analysis ----
+// Same underlying detections as analyzeGroup above (added-to-loser/winner
+// instances, concurrency, hold times, guard blocks) stay fully
+// deterministic — only the SYNTHESIS/narrative layer is handed to Claude.
+// That split matters: the facts fed to the model are pre-computed by this
+// app's own code, not something the model has to derive itself, so a
+// hallucinated number isn't possible the way it would be if the model were
+// asked to do the arithmetic from a raw trade dump. If the API call fails
+// for any reason (no key, network, bad JSON back), this falls back to the
+// deterministic analyzeGroup rather than sending a broken/empty email.
+export async function generateAiAnalysis(
+  group: ReportGroup,
+  blockedLogs: { blockedReason: string | null; date: Date }[],
+  reportLabel: string
+): Promise<AnalysisResult> {
+  if (group.trades.length === 0) return { good: [], watch: [] };
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error("ANTHROPIC_API_KEY not set — falling back to deterministic analysis.");
+    return analyzeGroup(group, blockedLogs);
+  }
+
+  try {
+    const addedToLoser = findAddedToLoserInstances(group.trades);
+    const addedToWinner = findAddedToWinnerInstances(group.trades);
+    const maxConcurrent = Math.max(0, ...group.trades.map((t) => concurrentCount(group.trades, t) ?? 0));
+
+    const holdMinutes = (t: ServerTrade) => {
+      if (!t.entryDate) return null;
+      const m = (new Date(t.date).getTime() - new Date(t.entryDate).getTime()) / 60000;
+      return Number.isFinite(m) && m >= 0 ? Math.round(m) : null;
+    };
+
+    const facts = {
+      period: reportLabel,
+      label: group.label,
+      pnl: Number(group.pnl.toFixed(2)),
+      tradeCount: group.trades.length,
+      winRate: group.winRate,
+      clean: group.clean,
+      flagged: group.flagged,
+      unrated: group.unrated,
+      maxConcurrentOpenTrades: maxConcurrent,
+      addedToLosingPosition: addedToLoser.map((i) => ({
+        symbol: i.earlier.symbol,
+        dir: i.earlier.dir,
+        earlierEntryPrice: i.earlier.entry,
+        earlierEntryTime: i.earlier.entryDate ? new Date(i.earlier.entryDate).toLocaleTimeString() : null,
+        laterEntryPrice: i.later.entry,
+        laterEntryTime: i.later.entryDate ? new Date(i.later.entryDate).toLocaleTimeString() : null,
+        gapMinutes: i.earlier.entryDate && i.later.entryDate
+          ? Math.round((new Date(i.later.entryDate).getTime() - new Date(i.earlier.entryDate).getTime()) / 60000)
+          : null,
+      })),
+      addedToWinningPosition: addedToWinner.map((i) => ({
+        symbol: i.earlier.symbol,
+        dir: i.earlier.dir,
+        earlierEntryPrice: i.earlier.entry,
+        laterEntryPrice: i.later.entry,
+      })),
+      trades: group.trades.map((t) => ({
+        time: new Date(t.date).toLocaleTimeString(),
+        symbol: t.symbol,
+        dir: t.dir,
+        entry: t.entry,
+        exit: t.exit,
+        holdMinutes: holdMinutes(t),
+        pnl: t.pnl,
+        disciplined: t.disciplined,
+        emotion: t.emotion,
+      })),
+      guardBlocksThisPeriod: blockedLogs.map((l) => l.blockedReason),
+    };
+
+    const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not.
+
+Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this shape:
+{"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
+
+Each array should have 2-5 items. Each item should be a complete, specific sentence citing real numbers/times from the data — not a category label. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler.
+
+DATA:
+${JSON.stringify(facts)}`;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
+        max_tokens: 1500,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!res.ok) {
+      console.error("Anthropic API error:", res.status, await res.text());
+      return analyzeGroup(group, blockedLogs);
+    }
+
+    const body = await res.json();
+    const text = (body.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+    const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!Array.isArray(parsed.good) || !Array.isArray(parsed.watch)) {
+      throw new Error("Unexpected response shape from Claude");
+    }
+
+    return { good: parsed.good, watch: parsed.watch };
+  } catch (err: any) {
+    console.error("AI analysis generation failed, falling back to deterministic:", err.message || err);
+    return analyzeGroup(group, blockedLogs);
+  }
+}

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 import { tradingDayStart, tradingDayKey } from "@/lib/tradingWindow";
-import { summarizeGroup, buildRichReportHtml, analyzeGroup, renderAnalysisHtml, holdTimeLabel } from "@/lib/serverReports";
+import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml, holdTimeLabel } from "@/lib/serverReports";
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
   });
 
   const group = summarizeGroup(tradingDayLabel, trades);
-  const analysis = analyzeGroup(group, blockedLogs);
+  const analysis = await generateAiAnalysis(group, blockedLogs, "Daily");
 
   const rows = trades
     .map(

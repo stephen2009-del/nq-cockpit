@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 import { weekStart, weekStartKey } from "@/lib/tradingWindow";
-import { summarizeGroup, buildRichReportHtml, analyzeGroup, renderAnalysisHtml } from "@/lib/serverReports";
+import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml } from "@/lib/serverReports";
 
 // Trigger this on its own external schedule (same mechanism as
 // daily-report — an external cron hitting this URL with ?key=CRON_SECRET),
@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
   });
 
   const group = summarizeGroup(weekLabel, trades);
-  const analysis = analyzeGroup(group, blockedLogs);
+  const analysis = await generateAiAnalysis(group, blockedLogs, "Weekly");
 
   // Per-day breakdown inside the week, for a quick at-a-glance table in the
   // email body (the full per-trade table lives in the attached report —
