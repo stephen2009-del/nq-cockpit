@@ -2236,10 +2236,18 @@ async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: 
   // days can share the same clock time. Prefixing with a short weekday
   // fixes that in the tooltip/axis labels themselves; the background
   // shading below (keyed off the same dayKeys) makes day boundaries
-  // visible on the chart at a glance too.
-  const equityLabels = items.map((t) =>
-    isMultiDay && t.date ? `${new Date(t.date).toLocaleDateString([], { weekday: "short" })} ${t.label}` : t.label
-  );
+  // visible on the chart at a glance too. Critically, the weekday shown
+  // here is derived from the SAME tradingDayKey (6pm ET rollover) used for
+  // the shading — not the raw calendar date of the timestamp — otherwise
+  // a trade at, say, 8pm Wednesday gets labeled "Wed" while the shading
+  // (correctly) already groups it with Thursday's trading day, and the
+  // two visibly disagree right at the boundary.
+  const equityLabels = items.map((t, i) => {
+    const key = dayKeys[i];
+    if (!isMultiDay || !key) return t.label;
+    const dayLabel = new Date(`${key}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+    return `${dayLabel} ${t.label}`;
+  });
   const equityData = items.map((t) => (cum += t.pnl));
   const perTradePnl = items.map((t) => t.pnl);
   const perTradeColors = perTradePnl.map((p) => (p >= 0 ? "#3FD0C9" : "#E5484D"));

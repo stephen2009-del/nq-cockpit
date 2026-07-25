@@ -158,11 +158,16 @@ export function buildRichReportHtml(
   // days can share the same clock time. Prefixing with a short weekday
   // fixes that in the tooltip/axis labels themselves; the background
   // shading below (keyed off the same dayKeys) makes day boundaries
-  // visible on the chart at a glance too.
-  const equityLabels = group.trades.map((t) => {
-    const d = new Date(t.date);
-    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    return isMultiDay ? `${d.toLocaleDateString([], { weekday: "short" })} ${time}` : time;
+  // visible on the chart at a glance too. Critically, the weekday shown
+  // here is derived from the SAME tradingDayKey (6pm ET rollover) used for
+  // the shading — not the raw calendar date of the timestamp — otherwise
+  // a trade at, say, 8pm Wednesday gets labeled "Wed" while the shading
+  // (correctly) already groups it with Thursday's trading day, and the
+  // two visibly disagree right at the boundary.
+  const equityLabels = group.trades.map((t, i) => {
+    const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const dayLabel = new Date(`${dayKeys[i]}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+    return isMultiDay ? `${dayLabel} ${time}` : time;
   });
   let cum = 0;
   const equityData = group.trades.map((t) => (cum += t.pnl));
