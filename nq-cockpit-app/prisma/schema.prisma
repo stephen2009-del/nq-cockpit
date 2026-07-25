@@ -58,6 +58,13 @@ model Settings {
   // means "auto-select if there's only one account, otherwise ask."
   liveAccountId        String?
   demoAccountId        String?
+  // Hard caps on adding to an already-open same-direction position, built
+  // after a week's report showed up to 11 concurrent longs stacked with a
+  // ~1-minute median gap between adds. Unlike the P&L-based losing-position
+  // guard, these are deterministic counts/timers enforced identically on
+  // demo and live — there's no "can't verify" case to fail open on.
+  maxConcurrentAdds    Int    @default(2) // max net contracts allowed in one direction, per symbol
+  addOnCooldownMinutes Int    @default(3) // minimum minutes between same-direction entries in a symbol
 }
 
 model TradovateOrderLog {

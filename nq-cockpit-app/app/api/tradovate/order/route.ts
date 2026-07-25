@@ -127,6 +127,51 @@ export async function POST(req: NextRequest) {
       // closing, or reversing is always allowed regardless of data
       // availability — there's nothing to protect against there.
       if (newDirection === existingDirection) {
+        // GUARD 2a — hard concurrency cap. Deterministic (Tradovate's own
+        // netPos, no "can't verify" case), so enforced identically on demo
+        // and live, unlike the P&L guard below. Built directly off a week
+        // where this account stacked up to 11 concurrent longs in one
+        // symbol — this blocks outright once you're already at the
+        // configured max, rather than warning and letting it through.
+        const existingContracts = Math.abs(position.netPos);
+        if (existingContracts >= settings.maxConcurrentAdds) {
+          const reason = `Already holding ${existingContracts} contract(s) ${existingDirection} in ${symbol} \u2014 at or above your configured max of ${settings.maxConcurrentAdds} concurrent (Settings \u2192 Max Concurrent Adds). Close or reduce first, or raise the limit if this one's genuinely intentional.`;
+          await prisma.tradovateOrderLog.create({
+            data: {
+              env, symbol, side: action, qty: parseInt(orderQty), orderType,
+              limitPrice: price ? parseFloat(price) : null,
+              status: "BLOCKED",
+              blockedReason: reason,
+            },
+          });
+          return NextResponse.json({ blocked: true, reason }, { status: 403 });
+        }
+
+        // GUARD 2b — cooldown between same-direction entries. The same
+        // week showed a median gap of ~1 minute between an entry and the
+        // next add — not a reassessment, closer to a reflex. This blocks
+        // any same-direction order within the configured window of the
+        // last one that actually went through for this symbol/env/account.
+        const lastSameDirection = await prisma.tradovateOrderLog.findFirst({
+          where: { env, symbol, side: action, status: "SUBMITTED" },
+          orderBy: { date: "desc" },
+        });
+        if (lastSameDirection) {
+          const minutesSince = (Date.now() - new Date(lastSameDirection.date).getTime()) / 60000;
+          if (minutesSince < settings.addOnCooldownMinutes) {
+            const reason = `Your last ${existingDirection} entry in ${symbol} was ${minutesSince < 1 ? "under a minute" : `${Math.floor(minutesSince)} minute(s)`} ago \u2014 below your configured cooldown of ${settings.addOnCooldownMinutes} minute(s) between same-direction entries (Settings \u2192 Add-On Cooldown). Wait it out, or adjust the setting if this pace is genuinely intentional.`;
+            await prisma.tradovateOrderLog.create({
+              data: {
+                env, symbol, side: action, qty: parseInt(orderQty), orderType,
+                limitPrice: price ? parseFloat(price) : null,
+                status: "BLOCKED",
+                blockedReason: reason,
+              },
+            });
+            return NextResponse.json({ blocked: true, reason }, { status: 403 });
+          }
+        }
+
         let directPnl = extractPositionPnl(position);
         let pnlSource: "position" | "account" | "logged_price" = "position";
 

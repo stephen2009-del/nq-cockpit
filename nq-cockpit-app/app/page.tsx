@@ -45,6 +45,8 @@ type Settings = {
   tradingWindowLocked: boolean;
   liveAccountId: string | null;
   demoAccountId: string | null;
+  maxConcurrentAdds: number;
+  addOnCooldownMinutes: number;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
@@ -178,7 +180,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null,
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null, maxConcurrentAdds: 2, addOnCooldownMinutes: 3,
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -3281,7 +3283,10 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
           </div>
           <div className="field"><label>Point Multiplier ($/pt)</label><input type="number" value={local.multiplier} onChange={(e) => setLocal({ ...local, multiplier: parseFloat(e.target.value) })} /></div>
           <div className="field"><label>Daily Loss Limit ($)</label><input type="number" value={local.dailyLossLimit} onChange={(e) => setLocal({ ...local, dailyLossLimit: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Max Concurrent Adds (contracts, per symbol/direction)</label><input type="number" min={1} value={local.maxConcurrentAdds} onChange={(e) => setLocal({ ...local, maxConcurrentAdds: parseInt(e.target.value) })} /></div>
+          <div className="field"><label>Add-On Cooldown (minutes between same-direction entries)</label><input type="number" min={0} value={local.addOnCooldownMinutes} onChange={(e) => setLocal({ ...local, addOnCooldownMinutes: parseInt(e.target.value) })} /></div>
         </div>
+        <div className="panel-desc" style={{ marginTop: -4, marginBottom: 8 }}>The two above are hard blocks in the Trade Ticket — enforced on both Demo and Live — built after a week's report showed up to 11 concurrent longs stacked with a ~1-minute median gap between adds.</div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
 
