@@ -4,6 +4,11 @@ import { sendEmail } from "@/lib/email";
 import { tradingDayStart, tradingDayKey } from "@/lib/tradingWindow";
 import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml, holdTimeLabel } from "@/lib/serverReports";
 
+// Ensures this route always executes fresh — no cached GET response could
+// ever explain identical output across requests while debugging the AI
+// analysis integration.
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
   if (!process.env.CRON_SECRET || key !== process.env.CRON_SECRET) {

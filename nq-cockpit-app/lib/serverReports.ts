@@ -393,9 +393,10 @@ export async function generateAiAnalysis(
   blockedLogs: { blockedReason: string | null; date: Date }[],
   reportLabel: string
 ): Promise<AnalysisResult> {
+  console.log(`[AI-ANALYSIS] called for ${reportLabel} — trades=${group.trades.length}, ANTHROPIC_API_KEY present=${!!process.env.ANTHROPIC_API_KEY}`);
   if (group.trades.length === 0) return { good: [], watch: [] };
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("ANTHROPIC_API_KEY not set — falling back to deterministic analysis.");
+    console.error("[AI-ANALYSIS] ANTHROPIC_API_KEY not set — falling back to deterministic analysis.");
     return analyzeGroup(group, blockedLogs);
   }
 
@@ -461,6 +462,7 @@ Each array should have 2-5 items. Each item should be a complete, specific sente
 DATA:
 ${JSON.stringify(facts)}`;
 
+    console.log(`[AI-ANALYSIS] calling Anthropic API, model=${process.env.ANTHROPIC_MODEL || "claude-sonnet-5"}, prompt length=${prompt.length} chars`);
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -474,9 +476,10 @@ ${JSON.stringify(facts)}`;
         messages: [{ role: "user", content: prompt }],
       }),
     });
+    console.log(`[AI-ANALYSIS] Anthropic API responded with status ${res.status}`);
 
     if (!res.ok) {
-      console.error("Anthropic API error:", res.status, await res.text());
+      console.error("[AI-ANALYSIS] Anthropic API error:", res.status, await res.text());
       return analyzeGroup(group, blockedLogs);
     }
 
@@ -489,9 +492,10 @@ ${JSON.stringify(facts)}`;
       throw new Error("Unexpected response shape from Claude");
     }
 
+    console.log(`[AI-ANALYSIS] success — good=${parsed.good.length} items, watch=${parsed.watch.length} items`);
     return { good: parsed.good, watch: parsed.watch };
   } catch (err: any) {
-    console.error("AI analysis generation failed, falling back to deterministic:", err.message || err);
+    console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
     return analyzeGroup(group, blockedLogs);
   }
 }

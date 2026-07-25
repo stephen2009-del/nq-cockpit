@@ -4,6 +4,11 @@ import { sendEmail } from "@/lib/email";
 import { weekStart, weekStartKey } from "@/lib/tradingWindow";
 import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml } from "@/lib/serverReports";
 
+// Ensures this route always executes fresh — no cached GET response could
+// ever explain identical output across requests while debugging the AI
+// analysis integration.
+export const dynamic = "force-dynamic";
+
 // Trigger this on its own external schedule (same mechanism as
 // daily-report — an external cron hitting this URL with ?key=CRON_SECRET),
 // once a week. Friday afternoon/evening or Sunday before Globex reopens
