@@ -26,18 +26,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "REPORT_EMAIL is not set" }, { status: 500 });
   }
 
-  // Same fix as the daily-report cron: without this, every trade
+  // Defaults to Live specifically — not Settings' current environment,
+  // since that toggle changes whenever you're testing something in Demo,
+  // and the automated report shouldn't silently follow that. Override
+  // with ?env=all|live|demo in the cron URL if you ever want a different
+  // scope for a specific run. Without any env filter at all, every trade
   // regardless of account gets blended into one number — the exact
   // Demo/Live mixing problem the rest of this app exists to prevent.
-  // Defaults to Settings' current environment, overridable via ?env=.
   const envParam = req.nextUrl.searchParams.get("env");
-  let envFilter: "all" | "live" | "demo";
-  if (envParam === "all" || envParam === "live" || envParam === "demo") {
-    envFilter = envParam;
-  } else {
-    const settings = await prisma.settings.findUnique({ where: { id: 1 } });
-    envFilter = settings?.tradovateEnv === "live" ? "live" : "demo";
-  }
+  const envFilter: "all" | "live" | "demo" =
+    envParam === "all" || envParam === "live" || envParam === "demo" ? envParam : "live";
   const sourceWhere = envFilter === "all" ? {} : { source: envFilter };
   const envLabel = envFilter === "all" ? "All Accounts" : envFilter === "live" ? "Live" : "Demo";
 

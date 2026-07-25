@@ -21,19 +21,17 @@ export async function GET(req: NextRequest) {
   }
 
   // Which account(s) this report covers. Defaults to whatever Settings'
-  // current environment is (same default the Reports tab itself uses),
-  // but can be overridden with ?env=all|live|demo in the cron URL. Without
-  // this, every trade regardless of account gets blended into one number —
-  // exactly the Demo/Live mixing problem the rest of this app was built to
-  // eliminate, which is what was happening here before this fix.
+  // Defaults to Live specifically — not Settings' current environment,
+  // since that toggle changes whenever you're testing something in Demo,
+  // and the automated report shouldn't silently follow that. Override
+  // with ?env=all|live|demo in the cron URL if you ever want a different
+  // scope for a specific run. Without any env filter at all, every trade
+  // regardless of account gets blended into one number — exactly the
+  // Demo/Live mixing problem the rest of this app was built to eliminate,
+  // which is what was happening here before this fix.
   const envParam = req.nextUrl.searchParams.get("env");
-  let envFilter: "all" | "live" | "demo";
-  if (envParam === "all" || envParam === "live" || envParam === "demo") {
-    envFilter = envParam;
-  } else {
-    const settings = await prisma.settings.findUnique({ where: { id: 1 } });
-    envFilter = settings?.tradovateEnv === "live" ? "live" : "demo";
-  }
+  const envFilter: "all" | "live" | "demo" =
+    envParam === "all" || envParam === "live" || envParam === "demo" ? envParam : "live";
   const sourceWhere = envFilter === "all" ? {} : { source: envFilter };
   const envLabel = envFilter === "all" ? "All Accounts" : envFilter === "live" ? "Live" : "Demo";
 
