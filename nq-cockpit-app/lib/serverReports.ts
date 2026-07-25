@@ -463,19 +463,33 @@ DATA:
 ${JSON.stringify(facts)}`;
 
     console.log(`[AI-ANALYSIS] calling Anthropic API, model=${process.env.ANTHROPIC_MODEL || "claude-sonnet-5"}, prompt length=${prompt.length} chars`);
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
-        max_tokens: 4096,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
+    // Explicit timeout — without this, a slow generation (max_tokens gives
+    // the model room to run long) can hang the fetch indefinitely, which
+    // hangs the ENTIRE cron request (the email never gets sent at all,
+    // not even the fallback) rather than just this one section failing.
+    // 25s gives real responses plenty of room while still failing fast
+    // enough to fall back and let the email go out on schedule.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+    let res: Response;
+    try {
+      res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
+          max_tokens: 2048,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
     console.log(`[AI-ANALYSIS] Anthropic API responded with status ${res.status}`);
 
     if (!res.ok) {
@@ -502,7 +516,11 @@ ${JSON.stringify(facts)}`;
     console.log(`[AI-ANALYSIS] success — good=${parsed.good.length} items, watch=${parsed.watch.length} items`);
     return { good: parsed.good, watch: parsed.watch };
   } catch (err: any) {
-    console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
+    if (err.name === "AbortError") {
+      console.error("[AI-ANALYSIS] Anthropic API call timed out after 25s, falling back to deterministic.");
+    } else {
+      console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
+    }
     return analyzeGroup(group, blockedLogs);
   }
 }
