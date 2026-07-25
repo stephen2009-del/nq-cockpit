@@ -15,6 +15,23 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "REPORT_EMAIL is not set" }, { status: 500 });
   }
 
+  // Which account(s) this report covers. Defaults to whatever Settings'
+  // current environment is (same default the Reports tab itself uses),
+  // but can be overridden with ?env=all|live|demo in the cron URL. Without
+  // this, every trade regardless of account gets blended into one number —
+  // exactly the Demo/Live mixing problem the rest of this app was built to
+  // eliminate, which is what was happening here before this fix.
+  const envParam = req.nextUrl.searchParams.get("env");
+  let envFilter: "all" | "live" | "demo";
+  if (envParam === "all" || envParam === "live" || envParam === "demo") {
+    envFilter = envParam;
+  } else {
+    const settings = await prisma.settings.findUnique({ where: { id: 1 } });
+    envFilter = settings?.tradovateEnv === "live" ? "live" : "demo";
+  }
+  const sourceWhere = envFilter === "all" ? {} : { source: envFilter };
+  const envLabel = envFilter === "all" ? "All Accounts" : envFilter === "live" ? "Live" : "Demo";
+
   const now = new Date();
   // A "trading day" runs 6pm ET to 6pm ET the next day (CME Globex
   // convention), matching tradingDayKey/tradingDayStart used everywhere
@@ -24,7 +41,7 @@ export async function GET(req: NextRequest) {
   const tradingDayLabel = new Date(`${tradingDayKey(now)}T12:00:00`).toDateString();
 
   const trades = await prisma.trade.findMany({
-    where: { date: { gte: startOfDay, lt: endOfDay } },
+    where: { date: { gte: startOfDay, lt: endOfDay }, ...sourceWhere },
     orderBy: { date: "asc" },
   });
 
@@ -38,11 +55,11 @@ export async function GET(req: NextRequest) {
   });
 
   const blockedLogs = await prisma.tradovateOrderLog.findMany({
-    where: { date: { gte: startOfDay, lt: endOfDay }, status: "BLOCKED" },
+    where: { date: { gte: startOfDay, lt: endOfDay }, status: "BLOCKED", ...(envFilter === "all" ? {} : { env: envFilter }) },
     select: { blockedReason: true, date: true },
   });
 
-  const group = summarizeGroup(tradingDayLabel, trades);
+  const group = summarizeGroup(`${tradingDayLabel} \u2014 ${envLabel}`, trades);
   const analysis = await generateAiAnalysis(group, blockedLogs, "Daily");
 
   const rows = trades
@@ -67,7 +84,7 @@ export async function GET(req: NextRequest) {
   // the attached report (opened in a real browser), not here.
   const html = `
     <div style="font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;border-radius:8px;">
-      <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Daily Report</h2>
+      <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Daily Report (${envLabel})</h2>
       <p style="color:#7F8CA6;margin:0 0 16px;">${tradingDayLabel}</p>
       <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;flex-wrap:wrap;">
         <div><strong>P&amp;L:</strong> ${group.pnl >= 0 ? "$" : "-$"}${Math.abs(group.pnl).toFixed(2)}</div>
@@ -102,15 +119,15 @@ export async function GET(req: NextRequest) {
 
   await sendEmail({
     to,
-    subject: `NQ Cockpit — ${trades.length} trade(s), ${group.pnl >= 0 ? "+" : "-"}$${Math.abs(group.pnl).toFixed(2)} — ${tradingDayLabel}`,
+    subject: `NQ Cockpit (${envLabel}) — ${trades.length} trade(s), ${group.pnl >= 0 ? "+" : "-"}$${Math.abs(group.pnl).toFixed(2)} — ${tradingDayLabel}`,
     html,
     attachments: [
       {
-        filename: `nq-cockpit-daily-report-${tradingDayKey(now)}.html`,
+        filename: `nq-cockpit-daily-report-${envFilter}-${tradingDayKey(now)}.html`,
         content: Buffer.from(reportHtml, "utf-8").toString("base64"),
       },
     ],
   });
 
-  return NextResponse.json({ ok: true, tradesCount: trades.length });
+  return NextResponse.json({ ok: true, tradesCount: trades.length, env: envFilter });
 }

@@ -21,6 +21,21 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "REPORT_EMAIL is not set" }, { status: 500 });
   }
 
+  // Same fix as the daily-report cron: without this, every trade
+  // regardless of account gets blended into one number — the exact
+  // Demo/Live mixing problem the rest of this app exists to prevent.
+  // Defaults to Settings' current environment, overridable via ?env=.
+  const envParam = req.nextUrl.searchParams.get("env");
+  let envFilter: "all" | "live" | "demo";
+  if (envParam === "all" || envParam === "live" || envParam === "demo") {
+    envFilter = envParam;
+  } else {
+    const settings = await prisma.settings.findUnique({ where: { id: 1 } });
+    envFilter = settings?.tradovateEnv === "live" ? "live" : "demo";
+  }
+  const sourceWhere = envFilter === "all" ? {} : { source: envFilter };
+  const envLabel = envFilter === "all" ? "All Accounts" : envFilter === "live" ? "Live" : "Demo";
+
   const now = new Date();
   // A "trading week" runs Sunday 6pm ET through Friday 1pm ET — not the
   // standard Mon-Fri calendar week — matching the Reports tab's Weekly view.
@@ -29,10 +44,10 @@ export async function GET(req: NextRequest) {
   const weekKey = weekStartKey(now);
   const sunday = new Date(`${weekKey}T12:00:00`);
   const friday = new Date(sunday.getTime() + 5 * 24 * 60 * 60 * 1000);
-  const weekLabel = `Week of ${sunday.toLocaleDateString([], { month: "short", day: "numeric" })} \u2013 ${friday.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}`;
+  const weekLabel = `Week of ${sunday.toLocaleDateString([], { month: "short", day: "numeric" })} \u2013 ${friday.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })} \u2014 ${envLabel}`;
 
   const trades = await prisma.trade.findMany({
-    where: { date: { gte: startOfWeek, lt: endOfWeek } },
+    where: { date: { gte: startOfWeek, lt: endOfWeek }, ...sourceWhere },
     orderBy: { date: "asc" },
   });
 
@@ -42,7 +57,7 @@ export async function GET(req: NextRequest) {
   });
 
   const blockedLogs = await prisma.tradovateOrderLog.findMany({
-    where: { date: { gte: startOfWeek, lt: endOfWeek }, status: "BLOCKED" },
+    where: { date: { gte: startOfWeek, lt: endOfWeek }, status: "BLOCKED", ...(envFilter === "all" ? {} : { env: envFilter }) },
     select: { blockedReason: true, date: true },
   });
 
@@ -74,7 +89,7 @@ export async function GET(req: NextRequest) {
 
   const html = `
     <div style="font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;border-radius:8px;">
-      <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Weekly Report</h2>
+      <h2 style="color:#F5A623;margin:0 0 4px;">NQ COCKPIT — Weekly Report (${envLabel})</h2>
       <p style="color:#7F8CA6;margin:0 0 16px;">${weekLabel}</p>
       <div style="display:flex;gap:24px;margin-bottom:16px;font-size:14px;flex-wrap:wrap;">
         <div><strong>P&amp;L:</strong> ${group.pnl >= 0 ? "$" : "-$"}${Math.abs(group.pnl).toFixed(2)}</div>
@@ -103,15 +118,15 @@ export async function GET(req: NextRequest) {
 
   await sendEmail({
     to,
-    subject: `NQ Cockpit Weekly — ${trades.length} trade(s), ${group.pnl >= 0 ? "+" : "-"}$${Math.abs(group.pnl).toFixed(2)} — ${weekLabel}`,
+    subject: `NQ Cockpit Weekly (${envLabel}) — ${trades.length} trade(s), ${group.pnl >= 0 ? "+" : "-"}$${Math.abs(group.pnl).toFixed(2)} — ${weekLabel}`,
     html,
     attachments: [
       {
-        filename: `nq-cockpit-weekly-report-${weekKey}.html`,
+        filename: `nq-cockpit-weekly-report-${envFilter}-${weekKey}.html`,
         content: Buffer.from(reportHtml, "utf-8").toString("base64"),
       },
     ],
   });
 
-  return NextResponse.json({ ok: true, tradesCount: trades.length });
+  return NextResponse.json({ ok: true, tradesCount: trades.length, env: envFilter });
 }
