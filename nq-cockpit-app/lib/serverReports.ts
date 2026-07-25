@@ -454,10 +454,10 @@ export async function generateAiAnalysis(
 
     const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not.
 
-Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this shape:
+Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after the JSON object, in exactly this shape:
 {"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
 
-Each array should have 2-5 items. Each item should be a complete, specific sentence citing real numbers/times from the data — not a category label. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler.
+Each array should have 2-5 items. Keep each item to ONE sentence, under 35 words, citing real numbers/times from the data — not a category label, and not a multi-sentence paragraph. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler. Stay within these limits strictly — the response must be complete, valid JSON.
 
 DATA:
 ${JSON.stringify(facts)}`;
@@ -472,7 +472,7 @@ ${JSON.stringify(facts)}`;
       },
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
-        max_tokens: 1500,
+        max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -486,7 +486,14 @@ ${JSON.stringify(facts)}`;
     const body = await res.json();
     const text = (body.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
     const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
-    const parsed = JSON.parse(cleaned);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr: any) {
+      console.error(`[AI-ANALYSIS] JSON parse failed (stop_reason=${body.stop_reason}, response length=${text.length} chars): ${parseErr.message}`);
+      console.error(`[AI-ANALYSIS] raw response was: ${text.slice(0, 2000)}`);
+      throw parseErr;
+    }
 
     if (!Array.isArray(parsed.good) || !Array.isArray(parsed.watch)) {
       throw new Error("Unexpected response shape from Claude");
