@@ -72,8 +72,16 @@ export async function GET(req: NextRequest) {
     select: { blockedReason: true, date: true },
   });
 
+  // Not scoped by env — Emotional Journal entries aren't tied to a specific
+  // Tradovate account, they're just a timestamped note, so every entry in
+  // the window is relevant regardless of which env this report covers.
+  const emoEntries = await prisma.emotionalLogEntry.findMany({
+    where: { date: { gte: startOfDay, lt: endOfDay } },
+    orderBy: { date: "asc" },
+  });
+
   const group = summarizeGroup(`${tradingDayLabel} \u2014 ${envLabel}`, trades);
-  const analysis = await generateAiAnalysis(group, blockedLogs, "Daily");
+  const analysis = await generateAiAnalysis(group, blockedLogs, "Daily", emoEntries);
 
   const rows = trades
     .map(
@@ -124,11 +132,30 @@ export async function GET(req: NextRequest) {
             </table>`
           : `<p style="color:#7F8CA6;">No trades logged today.</p>`
       }
+      ${emoEntries.length ? `
+      <div style="margin-top:16px;">
+        <div style="color:#F5A623;font-weight:bold;margin-bottom:6px;">Emotional Journal</div>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;">
+          <thead><tr>
+            <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Time</th>
+            <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Tag</th>
+            <th style="text-align:left;padding:6px 10px;color:#7F8CA6;">Note</th>
+          </tr></thead>
+          <tbody>
+            ${emoEntries.map((e) => `
+            <tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.tag || "\u2014"}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.note}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>` : ""}
       <p style="color:#7F8CA6;font-size:12px;margin-top:16px;">Full report with charts and any chart snapshots is attached as an HTML file — open it in a browser for the interactive version.</p>
     </div>
   `;
 
-  const reportHtml = buildRichReportHtml(group, snapshots, "Daily");
+  const reportHtml = buildRichReportHtml(group, snapshots, "Daily", emoEntries);
 
   await sendEmail({
     to,

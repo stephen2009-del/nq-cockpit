@@ -125,7 +125,8 @@ function fmtMoney(n: number): string {
 export function buildRichReportHtml(
   group: ReportGroup,
   snapshots: { date: Date; note: string | null; imageData: string }[],
-  reportLabel: string
+  reportLabel: string,
+  emoEntries: { date: Date; tag: string | null; note: string }[] = []
 ): string {
   const addedToLoser = findAddedToLoserInstances(group.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
@@ -300,6 +301,19 @@ export function buildRichReportHtml(
       <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` — ${s.note}` : ""}</div>
     </div>`).join("")}
   </div>` : ""}
+  ${emoEntries.length ? `
+  <h3 style="color:#3FD0C9;font-size:15px;margin:20px 0 8px;">Emotional Journal</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Tag</th><th>Note</th></tr></thead>
+    <tbody>
+    ${emoEntries.map((e) => `
+    <tr>
+      <td>${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${e.tag || "—"}</td>
+      <td>${e.note}</td>
+    </tr>`).join("")}
+    </tbody>
+  </table>` : ""}
 </body></html>`;
 }
 
@@ -315,13 +329,23 @@ export type AnalysisResult = { good: string[]; watch: string[] };
 
 export function analyzeGroup(
   group: ReportGroup,
-  blockedLogs: { blockedReason: string | null; date: Date }[]
+  blockedLogs: { blockedReason: string | null; date: Date }[],
+  emoEntries: { date: Date; tag: string | null; note: string }[] = []
 ): AnalysisResult {
   const good: string[] = [];
   const watch: string[] = [];
 
   if (group.trades.length === 0) {
     return { good: [], watch: [] };
+  }
+
+  if (emoEntries.length > 0) {
+    const tagCounts: Record<string, number> = {};
+    for (const e of emoEntries) {
+      if (e.tag) tagCounts[e.tag] = (tagCounts[e.tag] || 0) + 1;
+    }
+    const tagSummary = Object.entries(tagCounts).map(([tag, n]) => `${tag} x${n}`).join(", ");
+    watch.push(`${emoEntries.length} Emotional Journal entr${emoEntries.length === 1 ? "y" : "ies"} logged this period${tagSummary ? ` (${tagSummary})` : ""} — worth reading alongside the trades above for direct context on what was actually going on.`);
   }
 
   const addedToLoser = findAddedToLoserInstances(group.trades);
@@ -441,13 +465,14 @@ export function renderAnalysisHtml(analysis: AnalysisResult): string {
 export async function generateAiAnalysis(
   group: ReportGroup,
   blockedLogs: { blockedReason: string | null; date: Date }[],
-  reportLabel: string
+  reportLabel: string,
+  emoEntries: { date: Date; tag: string | null; note: string }[] = []
 ): Promise<AnalysisResult> {
   console.log(`[AI-ANALYSIS] called for ${reportLabel} — trades=${group.trades.length}, ANTHROPIC_API_KEY present=${!!process.env.ANTHROPIC_API_KEY}`);
   if (group.trades.length === 0) return { good: [], watch: [] };
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error("[AI-ANALYSIS] ANTHROPIC_API_KEY not set — falling back to deterministic analysis.");
-    return analyzeGroup(group, blockedLogs);
+    return analyzeGroup(group, blockedLogs, emoEntries);
   }
 
   try {
@@ -500,9 +525,14 @@ export async function generateAiAnalysis(
         emotion: t.emotion,
       })),
       guardBlocksThisPeriod: blockedLogs.map((l) => l.blockedReason),
+      emotionalJournalEntries: emoEntries.map((e) => ({
+        time: new Date(e.date).toLocaleTimeString(),
+        tag: e.tag,
+        note: e.note,
+      })),
     };
 
-    const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not.
+    const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not. If emotionalJournalEntries is non-empty, treat it as the most valuable data here — it's the trader's own direct, self-reported account of what they were thinking/feeling, unlike everything else which is inferred from price/time data. Quote or closely paraphrase specific entries and connect them to specific trades/times where the timing lines up, rather than just noting entries exist.
 
 Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after the JSON object, in exactly this shape:
 {"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
@@ -545,7 +575,7 @@ ${JSON.stringify(facts)}`;
 
     if (!res.ok) {
       console.error("[AI-ANALYSIS] Anthropic API error:", res.status, await res.text());
-      return analyzeGroup(group, blockedLogs);
+      return analyzeGroup(group, blockedLogs, emoEntries);
     }
 
     const body = await res.json();
@@ -572,6 +602,6 @@ ${JSON.stringify(facts)}`;
     } else {
       console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
     }
-    return analyzeGroup(group, blockedLogs);
+    return analyzeGroup(group, blockedLogs, emoEntries);
   }
 }

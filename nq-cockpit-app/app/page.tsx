@@ -609,7 +609,7 @@ export default function Page() {
         />
       )}
 
-      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} settings={settings} />}
+      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} emoEntries={emoEntries} settings={settings} />}
 
       {tab === "checklist" && (
         <>
@@ -3591,7 +3591,7 @@ function groupTradesByWeek(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
-async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], reportLabel: string = "Daily"): Promise<string> {
+async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], reportLabel: string = "Daily", dayEmoEntries: EmotionalEntry[] = []): Promise<string> {
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   const addedToWinner = findAddedToWinnerInstances(day.trades);
@@ -3666,10 +3666,23 @@ async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[numbe
       <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` \u2014 ${s.note}` : ""}</div>
     </div>`).join("")}
   </div>` : ""}
+  ${dayEmoEntries.length > 0 ? `
+  <h2>Emotional Journal</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Tag</th><th>Note</th></tr></thead>
+    <tbody>
+    ${dayEmoEntries.map((e) => `
+    <tr>
+      <td>${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${e.tag || "\u2014"}</td>
+      <td>${e.note}</td>
+    </tr>`).join("")}
+    </tbody>
+  </table>` : ""}
 </body></html>`;
 }
 
-async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all", reportLabel: string = "Daily") {
+async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all", reportLabel: string = "Daily", dayEmoEntries: EmotionalEntry[] = []) {
   const doc = new jsPDF({ orientation: "landscape" });
   const addedToLoser = findAddedToLoserInstances(day.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
@@ -3786,6 +3799,33 @@ async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[num
       y += 6;
       doc.addImage(s.imageData, "JPEG", 14, y, w, h);
       y += h + 12;
+    }
+  }
+
+  if (dayEmoEntries.length > 0) {
+    doc.addPage();
+    y = 20;
+    doc.setFont("courier", "bold");
+    doc.setFontSize(14);
+    doc.text("Emotional Journal", 14, y);
+    y += 10;
+    doc.setFont("courier", "normal");
+    doc.setFontSize(10);
+    for (const e of dayEmoEntries) {
+      if (y > 190) {
+        doc.addPage();
+        y = 20;
+      }
+      const time = new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      doc.setFont("courier", "bold");
+      doc.text(`${time}${e.tag ? "  [" + e.tag + "]" : ""}`, 14, y);
+      doc.setFont("courier", "normal");
+      y += 6;
+      // Wrap the note text to the page width rather than letting long
+      // entries run off the right edge.
+      const wrapped = doc.splitTextToSize(e.note, 260);
+      doc.text(wrapped, 14, y);
+      y += wrapped.length * 5 + 8;
     }
   }
 
@@ -3914,7 +3954,7 @@ function AddOnPatternsPanel({ days }: { days: ReturnType<typeof groupTradesByDay
   );
 }
 
-function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; settings: Settings }) {
+function ReportsTab({ trades, snapshots, emoEntries, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; emoEntries: EmotionalEntry[]; settings: Settings }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">(settings.tradovateEnv === "live" ? "live" : "demo");
   const [reportView, setReportView] = useState<"daily" | "weekly">("daily");
@@ -3975,6 +4015,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
         const addedToWinner = findAddedToWinnerInstances(day.trades);
         const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
         const daySnapshots = snapshots.filter((s) => (reportView === "daily" ? tradingDayKey(new Date(s.date)) === day.dateStr : weekStartKey(new Date(s.date)) === day.dateStr));
+        const dayEmoEntries = emoEntries.filter((e) => (reportView === "daily" ? tradingDayKey(new Date(e.date)) === day.dateStr : weekStartKey(new Date(e.date)) === day.dateStr));
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
@@ -3997,7 +4038,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
               onClick={(e) => {
                 e.stopPropagation();
                 const win = window.open("", "_blank");
-                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly").then((html) => {
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries).then((html) => {
                   if (!win) return;
                   const blob = new Blob([html], { type: "text/html" });
                   win.location.href = URL.createObjectURL(blob);
@@ -4010,7 +4051,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
               className="btn small ghost"
               onClick={(e) => {
                 e.stopPropagation();
-                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly").then((html) => {
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries).then((html) => {
                   const blob = new Blob([html], { type: "text/html" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
@@ -4025,7 +4066,7 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
             >
               Download HTML
             </button>
-            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter, reportView === "daily" ? "Daily" : "Weekly"); }}>Download PDF</button>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
@@ -4081,6 +4122,20 @@ function ReportsTab({ trades, snapshots, settings }: { trades: Trade[]; snapshot
                       <div key={s.id} style={{ width: 200 }}>
                         <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
                         <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{s.note ? ` — ${s.note}` : ""}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {dayEmoEntries.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div className="card-label">Emotional Journal</div>
+                  <div style={{ marginTop: 6 }}>
+                    {dayEmoEntries.map((e) => (
+                      <div key={e.id} style={{ padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                        <span className="card-sub" style={{ marginRight: 8 }}>{new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        {e.tag && <span className="tag flag" style={{ marginRight: 8 }}>{e.tag}</span>}
+                        <span>{e.note}</span>
                       </div>
                     ))}
                   </div>
