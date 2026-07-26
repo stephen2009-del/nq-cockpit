@@ -507,7 +507,7 @@ export async function generateAiAnalysis(
 Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after the JSON object, in exactly this shape:
 {"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
 
-Each array should have 2-5 items. Keep each item to ONE sentence, under 35 words, citing real numbers/times from the data — not a category label, and not a multi-sentence paragraph. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler. Stay within these limits strictly — the response must be complete, valid JSON.
+Each array should have 2-5 items. Keep each item to ONE sentence, under 35 words, citing real numbers/times from the data — not a category label, and not a multi-sentence paragraph. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler. Stay within these limits strictly — the response must be complete, valid JSON. Never reference the raw JSON field names below (e.g. "guardBlocksThisPeriod", "addedToLosingPosition") in your written sentences — describe what they mean in plain English instead (e.g. "no automated guard blocked any of these trades" rather than "guardBlocksThisPeriod is empty").
 
 DATA:
 ${JSON.stringify(facts)}`;
