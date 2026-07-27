@@ -1247,9 +1247,6 @@ function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayP
         <line x1={pad} y1={data.nqAnchorY} x2={w - pad} y2={data.nqAnchorY} stroke="var(--amber)" strokeDasharray="2 3" />
       )}
       <polyline points={data.coords} fill="none" stroke="var(--cyan)" strokeWidth="2" />
-      {data.points.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r="3" fill="var(--cyan)" />
-      ))}
     </svg>
   );
 }
@@ -1263,7 +1260,6 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
       ${data.nqLowY !== null ? `<line x1="${pad}" y1="${data.nqLowY}" x2="${w - pad}" y2="${data.nqLowY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqLowY + 12}" fill="#E5484D" font-size="10" text-anchor="end">Est. Low ${data.nqLow?.toFixed(1)}</text>` : ""}
       ${data.nqAnchorY !== null ? `<line x1="${pad}" y1="${data.nqAnchorY}" x2="${w - pad}" y2="${data.nqAnchorY}" stroke="#F5A623" stroke-dasharray="2 3"/>` : ""}
       <polyline points="${data.coords}" fill="none" stroke="#3FD0C9" stroke-width="2"/>
-      ${data.points.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#3FD0C9"/>`).join("")}
     </svg>`;
 
   const rows = checks.map((c) => `
@@ -4015,7 +4011,13 @@ function ReportsTab({ trades, snapshots, emoEntries, settings }: { trades: Trade
         const addedToWinner = findAddedToWinnerInstances(day.trades);
         const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
         const daySnapshots = snapshots.filter((s) => (reportView === "daily" ? tradingDayKey(new Date(s.date)) === day.dateStr : weekStartKey(new Date(s.date)) === day.dateStr));
-        const dayEmoEntries = emoEntries.filter((e) => (reportView === "daily" ? tradingDayKey(new Date(e.date)) === day.dateStr : weekStartKey(new Date(e.date)) === day.dateStr));
+        // Only shown for Live — these entries are about real trading
+        // headspace, not Demo practice, so Demo/All views skip them
+        // entirely rather than mixing in journal notes that may not even
+        // be about the account being viewed.
+        const dayEmoEntries = envFilter === "live"
+          ? emoEntries.filter((e) => (reportView === "daily" ? tradingDayKey(new Date(e.date)) === day.dateStr : weekStartKey(new Date(e.date)) === day.dateStr))
+          : [];
         return (
         <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div

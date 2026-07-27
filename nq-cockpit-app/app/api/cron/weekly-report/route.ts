@@ -64,13 +64,16 @@ export async function GET(req: NextRequest) {
     select: { blockedReason: true, date: true },
   });
 
-  // Not scoped by env — Emotional Journal entries aren't tied to a specific
-  // Tradovate account, they're just a timestamped note, so every entry in
-  // the window is relevant regardless of which env this report covers.
-  const emoEntries = await prisma.emotionalLogEntry.findMany({
-    where: { date: { gte: startOfWeek, lt: endOfWeek } },
-    orderBy: { date: "asc" },
-  });
+  // Only included for Live reports — these entries are about real trading
+  // headspace, not Demo practice, so Demo/All-scoped reports skip them
+  // entirely rather than mixing in journal notes that may not even be
+  // about the account this report covers.
+  const emoEntries = envFilter === "live"
+    ? await prisma.emotionalLogEntry.findMany({
+        where: { date: { gte: startOfWeek, lt: endOfWeek } },
+        orderBy: { date: "asc" },
+      })
+    : [];
 
   const group = summarizeGroup(weekLabel, trades);
   const analysis = await generateAiAnalysis(group, blockedLogs, "Weekly", emoEntries);
