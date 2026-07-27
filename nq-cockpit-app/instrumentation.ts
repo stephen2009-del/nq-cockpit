@@ -27,4 +27,23 @@ export async function register() {
   }, 60_000);
 
   console.log("Intraday auto-log scheduler started (every 60s, regular market hours only).");
+
+  // Separate poller: checks real Tradovate position P&L (Live only) every
+  // 60s and emails an alert the first time a position's unrealized loss
+  // crosses the configured threshold. Deliberately NOT limited to equity
+  // market hours like the poller above — this reads Tradovate's own
+  // position data directly, which is live whenever NQ itself is
+  // tradeable on Globex, including overnight, where nothing else in this
+  // app currently has any visibility at all. Built specifically to
+  // shrink the gap between a trade going underwater and knowing about
+  // it, aimed at the moment before an averaging-down sequence starts.
+  const { checkUnrealizedLossAlerts } = await import("@/lib/positionAlert");
+
+  setInterval(() => {
+    checkUnrealizedLossAlerts().catch((err) => {
+      console.error("Unrealized-loss alert scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Unrealized-loss alert scheduler started (every 60s, Live account, all hours).");
 }

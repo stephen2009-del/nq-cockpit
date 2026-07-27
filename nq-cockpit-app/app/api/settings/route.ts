@@ -41,6 +41,7 @@ export async function PUT(req: NextRequest) {
     demoAccountId: body.demoAccountId || null,
     maxConcurrentAdds: Number.isFinite(parseInt(body.maxConcurrentAdds)) ? Math.max(1, parseInt(body.maxConcurrentAdds)) : 2,
     addOnCooldownMinutes: Number.isFinite(parseInt(body.addOnCooldownMinutes)) ? Math.max(0, parseInt(body.addOnCooldownMinutes)) : 3,
+    unrealizedLossAlertThreshold: Number.isFinite(parseFloat(body.unrealizedLossAlertThreshold)) ? Math.max(0, parseFloat(body.unrealizedLossAlertThreshold)) : 500,
   };
 
   const settings = await prisma.settings.update({ where: { id: 1 }, data });

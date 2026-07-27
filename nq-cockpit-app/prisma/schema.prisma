@@ -65,6 +65,15 @@ model Settings {
   // demo and live — there's no "can't verify" case to fail open on.
   maxConcurrentAdds    Int    @default(2) // max net contracts allowed in one direction, per symbol
   addOnCooldownMinutes Int    @default(3) // minimum minutes between same-direction entries in a symbol
+  // Real-time unrealized-loss alert threshold (dollars, positive number) —
+  // built after a specific admitted pattern: trade goes against the
+  // trader, they go disable Tradovate's own daily loss limit directly (a
+  // path this app can't see or block), then add to the loser. This can't
+  // stop that sequence, but it can shrink the gap between "this trade
+  // just went underwater" and "I know that" from a full day down to
+  // about a minute, aimed at catching the trigger before the rest of the
+  // sequence starts. 0 or null disables the check entirely.
+  unrealizedLossAlertThreshold Float @default(500)
 }
 
 model TradovateOrderLog {
