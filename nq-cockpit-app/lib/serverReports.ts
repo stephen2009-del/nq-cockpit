@@ -537,7 +537,7 @@ export async function generateAiAnalysis(
 Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after the JSON object, in exactly this shape:
 {"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
 
-Each array should have 2-5 items. Keep each item to ONE sentence, under 35 words, citing real numbers/times from the data — not a category label, and not a multi-sentence paragraph. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler. Stay within these limits strictly — the response must be complete, valid JSON. Never reference the raw JSON field names below (e.g. "guardBlocksThisPeriod", "addedToLosingPosition") in your written sentences — describe what they mean in plain English instead (e.g. "no automated guard blocked any of these trades" rather than "guardBlocksThisPeriod is empty").
+Each array should have 2-5 items. HARD LIMIT: each item must be ONE sentence, 35 words maximum — count the words. This is a strict ceiling you must not exceed, not a suggestion. For example, "Several adds into strength paid off, e.g. entries at 28126 and 28153.5 that were later closed for +$1275 and +$375, showing the position could be managed well when price cooperated." is TOO LONG (2 clauses, 33+ words padded with an example) — instead write something like "Adds at 28126 and 28153.5 closed for +$1275 and +$375." One number-dense clause per item, not a full explanation. Not a category label either. If there's genuinely nothing to flag in one category, it's fine for that array to be shorter, but don't pad with filler. If you are running low on room, STOP adding items and close the JSON properly (both arrays present, even if shorter than 5 items) rather than let a sentence run on or leave the JSON unterminated — an incomplete response is useless, a shorter-but-complete one is fine. Never reference the raw JSON field names below (e.g. "guardBlocksThisPeriod", "addedToLosingPosition") in your written sentences — describe what they mean in plain English instead (e.g. "no automated guard blocked any of these trades" rather than "guardBlocksThisPeriod is empty").
 
 DATA:
 ${JSON.stringify(facts)}`;
@@ -563,7 +563,7 @@ ${JSON.stringify(facts)}`;
         },
         body: JSON.stringify({
           model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
-          max_tokens: 2048,
+          max_tokens: 8192,
           messages: [{ role: "user", content: prompt }],
         }),
         signal: controller.signal,
