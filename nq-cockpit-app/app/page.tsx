@@ -110,6 +110,23 @@ function roundToTick(price: number, tick: number = 0.25): number {
   return Math.round(price / tick) * tick;
 }
 
+// Default stop/target distances, applied automatically off whatever price
+// the Trade Ticket resolves to — 18 points against you, 29 points in your
+// favor, mirrored for the trade's direction (a Buy's stop sits below entry
+// and target above; a Sell is the reverse). Still ordinary editable text
+// inputs afterward, so a specific trade can override either number right
+// up until submit — this only sets the starting point instead of leaving
+// both blank.
+const DEFAULT_STOP_POINTS = 18;
+const DEFAULT_TARGET_POINTS = 29;
+function computeStopTarget(priceStr: string, action: string): { stopLoss: string; target: string } {
+  const p = parseFloat(priceStr);
+  if (isNaN(p)) return { stopLoss: "", target: "" };
+  const stop = action === "Sell" ? p + DEFAULT_STOP_POINTS : p - DEFAULT_STOP_POINTS;
+  const tgt = action === "Sell" ? p - DEFAULT_TARGET_POINTS : p + DEFAULT_TARGET_POINTS;
+  return { stopLoss: String(roundToTick(stop)), target: String(roundToTick(tgt)) };
+}
+
 function addMinutesLabel(hhmm: string, deltaMinutes: number): string {
   const [h, m] = hhmm.split(":").map(Number);
   let total = h * 60 + m + deltaMinutes;
@@ -1627,7 +1644,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
-  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
+  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Limit", price: "", stopLoss: "", target: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
   const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
@@ -1649,6 +1666,21 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     ? `${lastKnownPriceAgeMinutes} min ago`
     : `${Math.floor(lastKnownPriceAgeMinutes / 60)}h ${lastKnownPriceAgeMinutes % 60}m ago`;
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
+
+  // Order Type defaults to Limit now, so — unlike before, when this only
+  // ever ran off an explicit "switch to Limit" click — the price (and the
+  // default stop/target derived from it) need a first prefill as soon as a
+  // fresh last-known price actually arrives, since it loads in async after
+  // the initial render. Only fires while the field is still untouched
+  // (empty), so it never overwrites a price you've already started typing.
+  useEffect(() => {
+    if (form.orderType === "Limit" && !form.price && lastKnownPriceIsFresh && lastKnownPrice !== null) {
+      const rounded = String(roundToTick(lastKnownPrice));
+      setForm((f) => (f.price ? f : { ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastKnownPrice, lastKnownPriceIsFresh]);
+
   const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null; openSinceMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [lockingOut, setLockingOut] = useState(false);
@@ -1785,7 +1817,10 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }, [form.root, settings.tradovateEnv]);
 
   function useLimitOrder() {
-    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price }));
+    setForm((f) => {
+      const price = lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price;
+      return { ...f, orderType: "Limit", price, ...computeStopTarget(price, f.action) };
+    });
   }
 
   async function submitOrder() {
@@ -1925,7 +1960,17 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             </select>
           </div>
           <div className="field"><label>Side</label>
-            <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
+            <select
+              value={form.action}
+              onChange={(e) => {
+                const newAction = e.target.value;
+                setForm((f) => ({
+                  ...f,
+                  action: newAction,
+                  ...(f.orderType === "Limit" && f.price ? computeStopTarget(f.price, newAction) : {}),
+                }));
+              }}
+            >
               <option value="Buy">Buy</option>
               <option value="Sell">Sell</option>
             </select>
@@ -1949,11 +1994,15 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
               value={form.orderType}
               onChange={(e) => {
                 const newType = e.target.value;
-                setForm((f) => ({
-                  ...f,
-                  orderType: newType,
-                  price: newType === "Limit" && !f.price && lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price,
-                }));
+                setForm((f) => {
+                  const price = newType === "Limit" && !f.price && lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price;
+                  return {
+                    ...f,
+                    orderType: newType,
+                    price,
+                    ...(newType === "Limit" && price && !f.stopLoss && !f.target ? computeStopTarget(price, f.action) : {}),
+                  };
+                });
               }}
             >
               <option value="Market">Market</option>
@@ -1967,7 +2016,10 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                 onChange={(e) => setForm({ ...form, price: e.target.value })}
                 onBlur={(e) => {
                   const v = parseFloat(e.target.value);
-                  if (!isNaN(v)) setForm((f) => ({ ...f, price: String(roundToTick(v)) }));
+                  if (!isNaN(v)) {
+                    const rounded = String(roundToTick(v));
+                    setForm((f) => ({ ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+                  }
                 }}
               />
               <div className="card-sub" style={{ marginTop: 4 }}>
