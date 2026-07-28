@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 import { tradingDayStart, tradingDayKey } from "@/lib/tradingWindow";
-import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml, holdTimeLabel } from "@/lib/serverReports";
+import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml, holdTimeLabel, etTime } from "@/lib/serverReports";
 
 // Ensures this route always executes fresh — no cached GET response could
 // ever explain identical output across requests while debugging the AI
@@ -90,7 +90,7 @@ export async function GET(req: NextRequest) {
     .map(
       (t) => `
     <tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #263654;">${etTime(new Date(t.date))}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.symbol}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.source.toUpperCase()}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #263654;">${t.dir.toUpperCase()}</td>
@@ -147,7 +147,7 @@ export async function GET(req: NextRequest) {
           <tbody>
             ${emoEntries.map((e) => `
             <tr>
-              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${etTime(new Date(e.date))}</td>
               <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.tag || "\u2014"}</td>
               <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.note}</td>
             </tr>`).join("")}

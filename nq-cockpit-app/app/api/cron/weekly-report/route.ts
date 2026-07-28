@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sendEmail } from "@/lib/email";
 import { weekStart, weekStartKey } from "@/lib/tradingWindow";
-import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml } from "@/lib/serverReports";
+import { summarizeGroup, buildRichReportHtml, generateAiAnalysis, renderAnalysisHtml, etDateTime } from "@/lib/serverReports";
 
 // Ensures this route always executes fresh — no cached GET response could
 // ever explain identical output across requests while debugging the AI
@@ -136,7 +136,7 @@ export async function GET(req: NextRequest) {
           <tbody>
             ${emoEntries.map((e) => `
             <tr>
-              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${new Date(e.date).toLocaleString()}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #263654;">${etDateTime(new Date(e.date))}</td>
               <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.tag || "\u2014"}</td>
               <td style="padding:6px 10px;border-bottom:1px solid #263654;">${e.note}</td>
             </tr>`).join("")}

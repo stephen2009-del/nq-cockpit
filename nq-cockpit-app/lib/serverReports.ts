@@ -115,6 +115,29 @@ function fmtMoney(n: number): string {
   return `${n >= 0 ? "$" : "-$"}${Math.abs(n).toFixed(2)}`;
 }
 
+// Explicit Eastern Time formatting — critical on the server specifically.
+// Nothing in this app sets a TZ environment variable, so without an
+// explicit timeZone here, every server-rendered time (email body, the
+// attached rich report, the AI analysis facts payload) silently follows
+// whatever timezone the Node process's container defaults to — almost
+// always UTC on a typical container image, NOT Eastern. That's a real,
+// not hypothetical, discrepancy: a trade at 10:19am ET would display as
+// "2:19 PM" if the container is on UTC. The client (browser) doesn't have
+// this problem, since toLocaleTimeString() there already follows the
+// user's own local timezone — this fix only matters server-side.
+export function etTime(date: Date): string {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+}
+export function etTimeWithSeconds(date: Date): string {
+  return date.toLocaleTimeString([], { timeZone: "America/New_York" });
+}
+export function etDateTime(date: Date): string {
+  return date.toLocaleString([], { timeZone: "America/New_York" });
+}
+export function etWeekday(date: Date): string {
+  return date.toLocaleDateString([], { weekday: "short", timeZone: "America/New_York" });
+}
+
 // Builds the same rich report as the Reports tab's Download HTML button —
 // full trade table (with Symbol column), red/green highlighted rows for
 // loser/winner adds, the callout boxes naming each instance, chart
@@ -138,7 +161,7 @@ export function buildRichReportHtml(
       (t) => `
     <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : winnerIds.has(t.id) ? ' style="background:rgba(63,208,201,0.15);"' : ""}>
       <td>${laterIds.has(t.id) ? "!" : winnerIds.has(t.id) ? "+" : ""}</td>
-      <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${etTime(new Date(t.date))}</td>
       <td>${t.symbol}</td>
       <td>${t.source.toUpperCase()}</td>
       <td>${t.dir.toUpperCase()}</td>
@@ -166,8 +189,8 @@ export function buildRichReportHtml(
   // (correctly) already groups it with Thursday's trading day, and the
   // two visibly disagree right at the boundary.
   const equityLabels = group.trades.map((t, i) => {
-    const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const dayLabel = new Date(`${dayKeys[i]}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+    const time = etTime(new Date(t.date));
+    const dayLabel = etWeekday(new Date(`${dayKeys[i]}T12:00:00`));
     return isMultiDay ? `${dayLabel} ${time}` : time;
   });
   let cum = 0;
@@ -211,12 +234,12 @@ export function buildRichReportHtml(
   ${addedToLoser.length > 0 ? `
   <div class="callout callout-loser">
     <div style="font-weight:bold;margin-bottom:6px;">! Added to a losing position — ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
-    ${addedToLoser.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.</div>`).join("")}
+    ${addedToLoser.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${etTime(new Date(inst.earlier.entryDate!))}, then added at ${inst.later.entry} at ${etTime(new Date(inst.later.entryDate!))} while the first was still open and underwater.</div>`).join("")}
   </div>` : ""}
   ${addedToWinner.length > 0 ? `
   <div class="callout callout-winner">
     <div style="font-weight:bold;margin-bottom:6px;">+ Added to a winning position — ${addedToWinner.length} instance${addedToWinner.length === 1 ? "" : "s"}</div>
-    ${addedToWinner.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.</div>`).join("")}
+    ${addedToWinner.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${etTime(new Date(inst.earlier.entryDate!))}, then added at ${inst.later.entry} at ${etTime(new Date(inst.later.entryDate!))} while the first was still open and in profit.</div>`).join("")}
   </div>` : ""}
   ${group.trades.length
       ? `<table>
@@ -298,7 +321,7 @@ export function buildRichReportHtml(
     ${snapshots.map((s) => `
     <div style="width:280px;">
       <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
-      <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` — ${s.note}` : ""}</div>
+      <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${etTime(new Date(s.date))}${s.note ? ` — ${s.note}` : ""}</div>
     </div>`).join("")}
   </div>` : ""}
   ${emoEntries.length ? `
@@ -308,7 +331,7 @@ export function buildRichReportHtml(
     <tbody>
     ${emoEntries.map((e) => `
     <tr>
-      <td>${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${etTime(new Date(e.date))}</td>
       <td>${e.tag || "—"}</td>
       <td>${e.note}</td>
     </tr>`).join("")}
@@ -500,9 +523,9 @@ export async function generateAiAnalysis(
         symbol: i.earlier.symbol,
         dir: i.earlier.dir,
         earlierEntryPrice: i.earlier.entry,
-        earlierEntryTime: i.earlier.entryDate ? new Date(i.earlier.entryDate).toLocaleTimeString() : null,
+        earlierEntryTime: i.earlier.entryDate ? etTimeWithSeconds(new Date(i.earlier.entryDate)) : null,
         laterEntryPrice: i.later.entry,
-        laterEntryTime: i.later.entryDate ? new Date(i.later.entryDate).toLocaleTimeString() : null,
+        laterEntryTime: i.later.entryDate ? etTimeWithSeconds(new Date(i.later.entryDate)) : null,
         gapMinutes: i.earlier.entryDate && i.later.entryDate
           ? Math.round((new Date(i.later.entryDate).getTime() - new Date(i.earlier.entryDate).getTime()) / 60000)
           : null,
@@ -514,7 +537,7 @@ export async function generateAiAnalysis(
         laterEntryPrice: i.later.entry,
       })),
       trades: group.trades.map((t) => ({
-        time: new Date(t.date).toLocaleTimeString(),
+        time: etTimeWithSeconds(new Date(t.date)),
         symbol: t.symbol,
         dir: t.dir,
         entry: t.entry,
@@ -526,7 +549,7 @@ export async function generateAiAnalysis(
       })),
       guardBlocksThisPeriod: blockedLogs.map((l) => l.blockedReason),
       emotionalJournalEntries: emoEntries.map((e) => ({
-        time: new Date(e.date).toLocaleTimeString(),
+        time: etTimeWithSeconds(new Date(e.date)),
         tag: e.tag,
         note: e.note,
       })),
