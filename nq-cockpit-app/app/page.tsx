@@ -1384,10 +1384,10 @@ function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayP
 }
 
 function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
-  const w = 900, h = 220, pad = 30;
+  const w = 900, h = 160, pad = 26;
   const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
   const svg = `
-    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px;background:#121B2E;border-radius:8px;" xmlns="http://www.w3.org/2000/svg">
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:150px;background:#121B2E;border-radius:8px;" xmlns="http://www.w3.org/2000/svg">
       ${data.nqHighY !== null ? `<line x1="${pad}" y1="${data.nqHighY}" x2="${w - pad}" y2="${data.nqHighY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqHighY - 4}" fill="#E5484D" font-size="10" text-anchor="end">Est. High ${data.nqHigh?.toFixed(1)}</text>` : ""}
       ${data.nqLowY !== null ? `<line x1="${pad}" y1="${data.nqLowY}" x2="${w - pad}" y2="${data.nqLowY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqLowY + 12}" fill="#E5484D" font-size="10" text-anchor="end">Est. Low ${data.nqLow?.toFixed(1)}</text>` : ""}
       ${data.nqAnchorY !== null ? `<line x1="${pad}" y1="${data.nqAnchorY}" x2="${w - pad}" y2="${data.nqAnchorY}" stroke="#F5A623" stroke-dasharray="2 3"/>` : ""}
@@ -1412,31 +1412,61 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     for (let level = end; level >= start; level -= 1) {
       const isAnchor = Math.abs(level - anchor) < 0.5;
       ladderRows.push(
-        `<tr${isAnchor ? ' style="background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;"' : ""}><td>${level.toFixed(2)}${isAnchor ? " \u2190 anchor" : ""}</td><td>${(level * mult).toFixed(2)}</td></tr>`
+        `<tr${isAnchor ? ' class="anchor-row"' : ""}><td>${level.toFixed(2)}${isAnchor ? " \u2190 anchor" : ""}</td><td>${(level * mult).toFixed(2)}</td></tr>`
       );
     }
     ladderHtml = `
-<h2 style="color:#3FD0C9;font-size:15px;margin:24px 0 8px;">QQQ / NQ Ladder (\u00b1${move} pts around anchor)</h2>
-<table><thead><tr><th>QQQ</th><th>NQ</th></tr></thead><tbody>${ladderRows.join("")}</tbody></table>`;
+      <div class="col">
+        <h2>QQQ / NQ Ladder (\u00b1${move} pts)</h2>
+        <table><thead><tr><th>QQQ</th><th>NQ</th></tr></thead><tbody>${ladderRows.join("")}</tbody></table>
+      </div>`;
   }
 
+  const checksHtml = `
+      <div class="col">
+        <h2>Logged Checks</h2>
+        <table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>`;
+
+  // Side-by-side columns (rather than stacked) plus a print stylesheet —
+  // a 21-row ladder next to a handful of logged checks fits comfortably
+  // on one printed page this way, where stacking them vertically (the
+  // original layout) usually spilled onto a second page.
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>NQ Cockpit — Intraday Chart</title>
 <style>
-body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:32px;}
-h1{color:#F5A623;} table{border-collapse:collapse;width:100%;margin-top:16px;}
-th,td{padding:8px 10px;border-bottom:1px solid #263654;text-align:left;font-size:13px;}
-th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
+  @page { size: letter; margin: 0.5in; }
+  body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:20px;font-size:12px;}
+  h1{color:#F5A623;font-size:18px;margin:0 0 4px;}
+  h2{color:#3FD0C9;font-size:13px;margin:0 0 6px;}
+  p{margin:2px 0;}
+  table{border-collapse:collapse;width:100%;margin-bottom:8px;}
+  th,td{padding:4px 8px;border-bottom:1px solid #263654;text-align:left;font-size:11px;}
+  th{color:#7F8CA6;text-transform:uppercase;font-size:9px;}
+  .cols{display:flex;gap:24px;margin-top:12px;}
+  .col{flex:1;min-width:0;}
+  .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  .note{color:#7F8CA6;font-size:10px;margin-top:12px;}
+  @media print {
+    body{background:#fff;color:#000;padding:0;font-size:10.5px;}
+    h1,h2{color:#000;}
+    th{color:#555;border-bottom-color:#ccc;}
+    td{border-bottom-color:#eee;}
+    .note{color:#666;}
+    .anchor-row td{background:#f0f0f0 !important;color:#000 !important;}
+    svg{background:#f3f3f3 !important;}
+  }
 </style></head>
 <body>
 <h1>NQ COCKPIT — Intraday Chart</h1>
-<p>${new Date().toLocaleDateString()} · ${checks.length} check(s) logged</p>
-${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} · Estimated move: ±${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
+<p>${new Date().toLocaleDateString()} \u00b7 ${checks.length} check(s) logged</p>
+${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} \u00b7 Estimated move: \u00b1${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
 ${svg}
+<div class="cols">
 ${ladderHtml}
-<h2 style="color:#3FD0C9;font-size:15px;margin:24px 0 8px;">Logged Checks</h2>
-<table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
-<p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
+${checksHtml}
+</div>
+<p class="note">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
 </body></html>`;
 
   return html;
