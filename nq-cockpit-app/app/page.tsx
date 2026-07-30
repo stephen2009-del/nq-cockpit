@@ -1397,6 +1397,29 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
   const rows = checks.map((c) => `
     <tr><td>${new Date(c.date).toLocaleTimeString()}</td><td>${c.qqqPrice.toFixed(2)}</td><td>${c.nqPrice.toFixed(2)}</td></tr>`).join("");
 
+  // Every whole QQQ point across the day's estimated-move band, mapped to
+  // its NQ equivalent — same ladder concept as the Pre-Market tab's export,
+  // scoped to just today's ±move range rather than an arbitrary window,
+  // since that's the actual range this report is about.
+  let ladderHtml = "";
+  if (todayPrep) {
+    const anchor = todayPrep.qqqPrice;
+    const move = todayPrep.estimatedMove;
+    const mult = todayPrep.multiplier;
+    const start = Math.floor(anchor - move);
+    const end = Math.ceil(anchor + move);
+    const ladderRows: string[] = [];
+    for (let level = end; level >= start; level -= 1) {
+      const isAnchor = Math.abs(level - anchor) < 0.5;
+      ladderRows.push(
+        `<tr${isAnchor ? ' style="background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;"' : ""}><td>${level.toFixed(2)}${isAnchor ? " \u2190 anchor" : ""}</td><td>${(level * mult).toFixed(2)}</td></tr>`
+      );
+    }
+    ladderHtml = `
+<h2 style="color:#3FD0C9;font-size:15px;margin:24px 0 8px;">QQQ / NQ Ladder (\u00b1${move} pts around anchor)</h2>
+<table><thead><tr><th>QQQ</th><th>NQ</th></tr></thead><tbody>${ladderRows.join("")}</tbody></table>`;
+  }
+
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>NQ Cockpit — Intraday Chart</title>
 <style>
@@ -1410,6 +1433,8 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <p>${new Date().toLocaleDateString()} · ${checks.length} check(s) logged</p>
 ${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} · Estimated move: ±${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
 ${svg}
+${ladderHtml}
+<h2 style="color:#3FD0C9;font-size:15px;margin:24px 0 8px;">Logged Checks</h2>
 <table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
 <p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
 </body></html>`;
