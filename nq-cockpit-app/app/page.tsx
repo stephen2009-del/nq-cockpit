@@ -830,6 +830,85 @@ function Dial({ score, color }: { score: number | null; color: string }) {
   );
 }
 
+function buildPreMarketPrepHtml(params: {
+  qqq: number;
+  mult: number;
+  move: number;
+  nqPrice: number;
+  nqLow: number;
+  nqHigh: number;
+  qqqLow: number;
+  qqqHigh: number;
+  openInterestNotes: string;
+  oiLevels: OILevel[];
+  ladderRows: { qqq: number; nq: number; isAnchor: boolean }[];
+}): string {
+  const { qqq, mult, move, nqPrice, nqLow, nqHigh, qqqLow, qqqHigh, openInterestNotes, oiLevels, ladderRows } = params;
+  const todayLabel = new Date().toDateString();
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<title>NQ Cockpit — Pre-Market Prep — ${todayLabel}</title>
+<style>
+  body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;}
+  h1{color:#F5A623;font-size:20px;margin:0 0 4px;}
+  h2{color:#3FD0C9;font-size:15px;margin:24px 0 8px;}
+  .sub{color:#7F8CA6;margin:0 0 16px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:12px;}
+  th{text-align:left;padding:6px 10px;color:#7F8CA6;border-bottom:1px solid #263654;}
+  td{padding:6px 10px;border-bottom:1px solid #1a2540;}
+  .stat-grid{display:flex;gap:32px;flex-wrap:wrap;margin-bottom:8px;}
+  .stat .label{color:#7F8CA6;font-size:11px;}
+  .stat .value{font-size:19px;font-weight:bold;}
+  .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  @media print {
+    body{background:#fff;color:#000;}
+    h1,h2{color:#000;}
+    th{color:#555;border-bottom-color:#ccc;}
+    td{border-bottom-color:#eee;}
+    .stat .label{color:#666;}
+    .anchor-row td{background:#f0f0f0;color:#000;}
+  }
+</style>
+</head>
+<body>
+  <h1>NQ COCKPIT — Pre-Market Prep</h1>
+  <p class="sub">${todayLabel}</p>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="label">QQQ PRICE</div><div class="value">${qqq.toFixed(2)}</div></div>
+    <div class="stat"><div class="label">MULTIPLIER</div><div class="value">${mult}</div></div>
+    <div class="stat"><div class="label">ESTIMATED MOVE (QQQ)</div><div class="value">\u00b1${move}</div></div>
+    <div class="stat"><div class="label">CALCULATED NQ PRICE</div><div class="value" style="color:#3FD0C9;">${nqPrice.toFixed(2)}</div></div>
+  </div>
+
+  <h2>Projected Ranges</h2>
+  <table>
+    <thead><tr><th></th><th>Low</th><th>Anchor</th><th>High</th></tr></thead>
+    <tbody>
+      <tr><td>NQ</td><td>${nqLow.toFixed(2)}</td><td>${nqPrice.toFixed(2)}</td><td>${nqHigh.toFixed(2)}</td></tr>
+      <tr><td>QQQ</td><td>${qqqLow.toFixed(2)}</td><td>${qqq.toFixed(2)}</td><td>${qqqHigh.toFixed(2)}</td></tr>
+    </tbody>
+  </table>
+
+  ${openInterestNotes ? `<h2>Open Interest Notes</h2><p>${openInterestNotes}</p>` : ""}
+
+  ${oiLevels.length ? `
+  <h2>Open Interest Levels</h2>
+  <table>
+    <thead><tr><th>Strike</th><th>OI</th><th>Note</th></tr></thead>
+    <tbody>${oiLevels.map((l) => `<tr><td>${l.strike}</td><td>${l.oi.toLocaleString()}</td><td>${l.note || "\u2014"}</td></tr>`).join("")}</tbody>
+  </table>` : ""}
+
+  <h2>QQQ / NQ Price Ladder</h2>
+  <table>
+    <thead><tr><th>QQQ</th><th>NQ</th></tr></thead>
+    <tbody>
+      ${ladderRows.map((row) => `<tr${row.isAnchor ? ' class="anchor-row"' : ""}><td>${row.qqq.toFixed(2)}${row.isAnchor ? " \u2190 today" : ""}</td><td>${row.nq.toFixed(2)}</td></tr>`).join("")}
+    </tbody>
+  </table>
+</body></html>`;
+}
+
 function PreMarketTab({
   form,
   setForm,
@@ -912,8 +991,43 @@ function PreMarketTab({
 
       {valid && (
         <div className="panel-box">
-          <div className="panel-title">QQQ / NQ Price Ladder</div>
-          <div className="panel-desc">Every QQQ level around today's price, mapped to its NQ equivalent.</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div className="panel-title" style={{ marginBottom: 2 }}>QQQ / NQ Price Ladder</div>
+              <div className="panel-desc" style={{ marginBottom: 0 }}>Every QQQ level around today's price, mapped to its NQ equivalent.</div>
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button
+                className="btn small ghost"
+                onClick={() => {
+                  const win = window.open("", "_blank");
+                  const html = buildPreMarketPrepHtml({ qqq, mult, move, nqPrice: nqPrice!, nqLow: nqLow!, nqHigh: nqHigh!, qqqLow: qqqLow!, qqqHigh: qqqHigh!, openInterestNotes: form.openInterestNotes, oiLevels, ladderRows });
+                  if (!win) return;
+                  const blob = new Blob([html], { type: "text/html" });
+                  win.location.href = URL.createObjectURL(blob);
+                }}
+              >
+                View HTML
+              </button>
+              <button
+                className="btn small ghost"
+                onClick={() => {
+                  const html = buildPreMarketPrepHtml({ qqq, mult, move, nqPrice: nqPrice!, nqLow: nqLow!, nqHigh: nqHigh!, qqqLow: qqqLow!, qqqHigh: qqqHigh!, openInterestNotes: form.openInterestNotes, oiLevels, ladderRows });
+                  const blob = new Blob([html], { type: "text/html" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `nq-cockpit-premarket-prep-${new Date().toISOString().slice(0, 10)}.html`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download HTML
+              </button>
+            </div>
+          </div>
           <div className="grid2" style={{ marginBottom: 16 }}>
             <div className="field"><label>Range (± QQQ points)</label>
               <input type="number" step="1" value={ladderRange} onChange={(e) => setLadderRange(e.target.value)} />
