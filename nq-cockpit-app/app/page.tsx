@@ -48,6 +48,8 @@ type Settings = {
   maxConcurrentAdds: number;
   addOnCooldownMinutes: number;
   unrealizedLossAlertThreshold: number;
+  postLossCooldownMinutes: number;
+  postLossCooldownThreshold: number;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
@@ -198,7 +200,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null, maxConcurrentAdds: 2, addOnCooldownMinutes: 3, unrealizedLossAlertThreshold: 500,
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null, maxConcurrentAdds: 2, addOnCooldownMinutes: 3, unrealizedLossAlertThreshold: 500, postLossCooldownMinutes: 5, postLossCooldownThreshold: 300,
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -592,7 +594,7 @@ export default function Page() {
 
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
 
-      {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
+      {tab === "tradeticket" && <TradeTicketTab settings={settings} trades={trades} />}
       {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} onTradeUpdated={(t) => setTrades((prev) => prev.map((p) => (p.id === t.id ? t : p)))} />}
       {tab === "emojournal" && <EmotionalJournalTab form={emoForm} setForm={setEmoForm} onSave={addEmoEntry} entries={emoEntries} />}
 
@@ -1801,7 +1803,7 @@ type OrderLog = {
   tradovateOrderId: string | null;
 };
 
-function TradeTicketTab({ settings }: { settings: Settings }) {
+function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trade[] }) {
   function computeWindowStatus() {
     const raw = getTradingWindowStatus(settings);
     if (settings.tradovateEnv !== "live") {
@@ -1852,6 +1854,49 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null; openSinceMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
+  const [stopInputs, setStopInputs] = useState<Record<string, string>>({});
+  const [stopModifyBusy, setStopModifyBusy] = useState<string | null>(null);
+
+  // Tightening a stop (reducing risk) goes straight through; loosening one
+  // requires a typed reason first, mirroring the add-on reason prompt —
+  // the closest real equivalent to "locking a stop" this app can enforce,
+  // since it can only govern stops modified through its own UI, not one
+  // changed directly in Tradovate.
+  async function submitStopModify(symbol: string) {
+    const newStop = parseFloat(stopInputs[symbol]);
+    if (isNaN(newStop)) {
+      alert("Enter a valid stop price first.");
+      return;
+    }
+    setStopModifyBusy(symbol);
+    try {
+      const doRequest = async (reason?: string) =>
+        fetch("/api/tradovate/modify-stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ env: settings.tradovateEnv, accountId: form.accountId, symbol, newStopPrice: newStop, reason }),
+        });
+      let res = await doRequest();
+      let body = await res.json();
+      if (res.status === 403 && body.blocked) {
+        const reason = window.prompt(`${body.reason}\n\nType a reason to proceed anyway, or Cancel to leave the stop as-is.`);
+        if (!reason || !reason.trim()) return;
+        res = await doRequest(reason);
+        body = await res.json();
+      }
+      if (body.ok) {
+        alert(`Stop updated: ${body.previousStop} \u2192 ${body.newStop}`);
+        setStopInputs((s) => ({ ...s, [symbol]: "" }));
+        refreshPositions();
+      } else if (body.warning) {
+        alert(`\u26a0 ${body.warning}`);
+      } else if (body.error) {
+        alert(body.error);
+      }
+    } finally {
+      setStopModifyBusy(null);
+    }
+  }
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
   const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
@@ -2113,6 +2158,25 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           {connStatus === null ? "Checking Tradovate connection…" : connStatus.connected ? `✓ Connected to Tradovate (${settings.tradovateEnv})` : `⚠ Not connected: ${JSON.stringify(connStatus.error)}`}
         </div>
 
+        {(() => {
+          // Every automated report has flagged the same gap repeatedly:
+          // synced trades almost never go through the Pre-Trade checklist,
+          // so there's no self-rated data to learn from beyond raw P&L.
+          // This won't force it — that's not realistic for fast synced
+          // fills — but a visible nudge before more trades stack up today
+          // is cheap and honest about what's missing.
+          const todayKey = tradingDayKey(new Date());
+          const todaysTrades = trades.filter((t) => t.source === settings.tradovateEnv && tradingDayKey(new Date(t.date)) === todayKey);
+          if (todaysTrades.length < 3) return null; // too early in the day for this to mean anything yet
+          const ratedCount = todaysTrades.filter((t) => t.disciplined !== null).length;
+          if (ratedCount > 0) return null;
+          return (
+            <div className="status-banner status-warn" style={{ marginTop: 8 }}>
+              📋 {todaysTrades.length} trades today, 0 through the Pre-Trade checklist — every report keeps flagging this same gap. Even a quick pass on the next entry gives future-you something more than raw P&amp;L to learn from.
+            </div>
+          );
+        })()}
+
         <div className="grid3" style={{ marginTop: 16 }}>
           <div className="field"><label>Account</label>
             <select value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
@@ -2341,7 +2405,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
               </div>
             ))}
             <table>
-              <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Time in Trade</th><th>Source</th></tr></thead>
+              <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Time in Trade</th><th>Source</th><th>Modify Stop</th></tr></thead>
               <tbody>
                 {currentPositions.map((p, i) => {
                   const isStale = p.pnlSource === "estimated" && p.loggedPriceAgeMinutes !== null && p.loggedPriceAgeMinutes > 10;
@@ -2364,6 +2428,18 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                          p.pnlSource === "account" ? "Tradovate (account)" :
                          p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)} (${p.loggedPriceAgeMinutes!.toFixed(0)} min ago)` :
                          "No price logged"}
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <input
+                            type="number" step="0.25" placeholder="new stop" style={{ width: 90 }}
+                            value={stopInputs[p.symbol] || ""}
+                            onChange={(e) => setStopInputs((s) => ({ ...s, [p.symbol]: e.target.value }))}
+                          />
+                          <button className="btn small ghost" disabled={stopModifyBusy === p.symbol} onClick={() => submitStopModify(p.symbol)}>
+                            {stopModifyBusy === p.symbol ? "…" : "Update"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -3555,8 +3631,10 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
           <div className="field"><label>Max Concurrent Adds (contracts, per symbol/direction)</label><input type="number" min={1} value={local.maxConcurrentAdds} onChange={(e) => setLocal({ ...local, maxConcurrentAdds: parseInt(e.target.value) })} /></div>
           <div className="field"><label>Add-On Cooldown (minutes between same-direction entries)</label><input type="number" min={0} value={local.addOnCooldownMinutes} onChange={(e) => setLocal({ ...local, addOnCooldownMinutes: parseInt(e.target.value) })} /></div>
           <div className="field"><label>Unrealized Loss Alert ($, Live only, 0 = off)</label><input type="number" min={0} value={local.unrealizedLossAlertThreshold} onChange={(e) => setLocal({ ...local, unrealizedLossAlertThreshold: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Post-Loss Cooldown ($) — any symbol</label><input type="number" min={0} value={local.postLossCooldownThreshold} onChange={(e) => setLocal({ ...local, postLossCooldownThreshold: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Post-Loss Cooldown (minutes)</label><input type="number" min={0} value={local.postLossCooldownMinutes} onChange={(e) => setLocal({ ...local, postLossCooldownMinutes: parseInt(e.target.value) })} /></div>
         </div>
-        <div className="panel-desc" style={{ marginTop: -4, marginBottom: 8 }}>The two above are hard blocks in the Trade Ticket — enforced on both Demo and Live — built after a week's report showed up to 11 concurrent longs stacked with a ~1-minute median gap between adds. The Unrealized Loss Alert is different — not a block, an email the first time an open Live position's unrealized loss crosses this number, checked roughly every minute around the clock (not just equity market hours). It can't stop a trade placed directly in Tradovate itself, but it shrinks the time between a trade going underwater and you actually knowing it.</div>
+        <div className="panel-desc" style={{ marginTop: -4, marginBottom: 8 }}>The two above are hard blocks in the Trade Ticket — enforced on both Demo and Live — built after a week's report showed up to 11 concurrent longs stacked with a ~1-minute median gap between adds. The Unrealized Loss Alert is different — not a block, an email the first time an open Live position's unrealized loss crosses this number, checked roughly every minute around the clock (not just equity market hours). It can't stop a trade placed directly in Tradovate itself, but it shrinks the time between a trade going underwater and you actually knowing it. Post-Loss Cooldown is a hard block too, but scoped differently — ANY new order, any symbol, is paused for this many minutes after a single closed trade loses at least this much, built after "Tilted / Revenge" journal entries describing impulsive re-entries that weren't limited to the same losing position.</div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
 

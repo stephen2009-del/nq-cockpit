@@ -64,6 +64,13 @@ export async function GET(req: NextRequest) {
     select: { blockedReason: true, date: true },
   });
 
+  // Orders with a bracket stop attached — cross-referenced against each
+  // trade's own exit to check whether that stop was actually honored.
+  const stopOrderLogs = await prisma.tradovateOrderLog.findMany({
+    where: { date: { gte: startOfWeek, lt: endOfWeek }, status: "SUBMITTED", stopLossPrice: { not: null }, ...(envFilter === "all" ? {} : { env: envFilter }) },
+    select: { symbol: true, side: true, date: true, stopLossPrice: true, status: true },
+  });
+
   // Only included for Live reports — these entries are about real trading
   // headspace, not Demo practice, so Demo/All-scoped reports skip them
   // entirely rather than mixing in journal notes that may not even be
@@ -76,7 +83,7 @@ export async function GET(req: NextRequest) {
     : [];
 
   const group = summarizeGroup(weekLabel, trades);
-  const analysis = await generateAiAnalysis(group, blockedLogs, "Weekly", emoEntries);
+  const analysis = await generateAiAnalysis(group, blockedLogs, "Weekly", emoEntries, stopOrderLogs);
 
   // Per-day breakdown inside the week, for a quick at-a-glance table in the
   // email body (the full per-trade table lives in the attached report —
@@ -147,7 +154,7 @@ export async function GET(req: NextRequest) {
     </div>
   `;
 
-  const reportHtml = buildRichReportHtml(group, snapshots, "Weekly", emoEntries);
+  const reportHtml = buildRichReportHtml(group, snapshots, "Weekly", emoEntries, stopOrderLogs);
 
   await sendEmail({
     to,

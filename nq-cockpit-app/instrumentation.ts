@@ -46,4 +46,19 @@ export async function register() {
   }, 60_000);
 
   console.log("Unrealized-loss alert scheduler started (every 60s, Live account, all hours).");
+
+  // Third poller, same 60s cadence: notices a position that appeared
+  // directly in Tradovate with no matching order in this app's own log —
+  // can't block a trade placed outside the app entirely, but surfaces it
+  // within about a minute instead of only finding out from an admission
+  // days later.
+  const { checkBypassAlerts } = await import("@/lib/positionAlert");
+
+  setInterval(() => {
+    checkBypassAlerts().catch((err) => {
+      console.error("Bypass-detection scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Bypass-detection scheduler started (every 60s, Live account, all hours).");
 }

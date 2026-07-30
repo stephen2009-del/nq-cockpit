@@ -66,6 +66,44 @@ function findAddOnInstances(trades: ServerTrade[], favorable: boolean): AddOnIns
 export const findAddedToLoserInstances = (trades: ServerTrade[]) => findAddOnInstances(trades, false);
 export const findAddedToWinnerInstances = (trades: ServerTrade[]) => findAddOnInstances(trades, true);
 
+export type StopOrderLog = { symbol: string; side: string; date: Date; stopLossPrice: number | null; status: string };
+export type StopViolation = { trade: ServerTrade; plannedStop: number; overageBy: number };
+
+// Cross-references each trade against the order it actually came from (the
+// most recent SUBMITTED order for that symbol/direction with a bracket
+// stop attached, placed within 5 minutes before the trade's own entry —
+// a wider match risks picking up an unrelated earlier order instead of
+// this trade's own bracket). If the trade's real exit is meaningfully past
+// where that stop was set, the stop wasn't honored — either moved,
+// cancelled, or never actually protecting the position by the time it
+// closed. This only catches trades placed through this app's own Trade
+// Ticket (the only place a stop price gets recorded at all); a stop set
+// or removed directly in Tradovate leaves no record to check against.
+export function findStopComplianceViolations(trades: ServerTrade[], orderLogs: StopOrderLog[]): StopViolation[] {
+  const violations: StopViolation[] = [];
+  for (const t of trades) {
+    if (!t.entryDate || t.exit === null) continue;
+    const side = t.dir === "long" ? "Buy" : "Sell";
+    const matches = orderLogs.filter(
+      (o) =>
+        o.symbol === t.symbol &&
+        o.side === side &&
+        o.status === "SUBMITTED" &&
+        o.stopLossPrice !== null &&
+        new Date(o.date).getTime() <= new Date(t.entryDate!).getTime()
+    );
+    if (matches.length === 0) continue;
+    matches.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const order = matches[0];
+    const gapMinutes = (new Date(t.entryDate).getTime() - new Date(order.date).getTime()) / 60000;
+    if (gapMinutes > 5) continue; // too far from entry to trust as this trade's own bracket
+    const stop = order.stopLossPrice!;
+    const overage = t.dir === "long" ? stop - t.exit! : t.exit! - stop;
+    if (overage > 0.5) violations.push({ trade: t, plannedStop: stop, overageBy: overage });
+  }
+  return violations;
+}
+
 // Concurrent-trade count for the equity-curve tooltip, same definition as
 // the client's ExpectedMoveTracker-adjacent chart code: counts itself, so 1
 // means never stacked with anything else. Symbol/direction-agnostic —
@@ -149,12 +187,14 @@ export function buildRichReportHtml(
   group: ReportGroup,
   snapshots: { date: Date; note: string | null; imageData: string }[],
   reportLabel: string,
-  emoEntries: { date: Date; tag: string | null; note: string }[] = []
+  emoEntries: { date: Date; tag: string | null; note: string }[] = [],
+  stopOrderLogs: StopOrderLog[] = []
 ): string {
   const addedToLoser = findAddedToLoserInstances(group.trades);
   const laterIds = new Set(addedToLoser.map((i) => i.later.id));
   const addedToWinner = findAddedToWinnerInstances(group.trades);
   const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
+  const stopViolations = findStopComplianceViolations(group.trades, stopOrderLogs);
 
   const rows = group.trades
     .map(
@@ -240,6 +280,11 @@ export function buildRichReportHtml(
   <div class="callout callout-winner">
     <div style="font-weight:bold;margin-bottom:6px;">+ Added to a winning position — ${addedToWinner.length} instance${addedToWinner.length === 1 ? "" : "s"}</div>
     ${addedToWinner.map((inst) => `<div class="callout-line">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${etTime(new Date(inst.earlier.entryDate!))}, then added at ${inst.later.entry} at ${etTime(new Date(inst.later.entryDate!))} while the first was still open and in profit.</div>`).join("")}
+  </div>` : ""}
+  ${stopViolations.length > 0 ? `
+  <div class="callout callout-loser">
+    <div style="font-weight:bold;margin-bottom:6px;">! Stop not honored — ${stopViolations.length} instance${stopViolations.length === 1 ? "" : "s"}</div>
+    ${stopViolations.map((v) => `<div class="callout-line">${v.trade.symbol} ${v.trade.dir.toUpperCase()}: stop was set at ${v.plannedStop}, actual exit at ${v.trade.exit} — ${v.overageBy.toFixed(2)} points past the planned stop.</div>`).join("")}
   </div>` : ""}
   ${group.trades.length
       ? `<table>
@@ -353,7 +398,8 @@ export type AnalysisResult = { good: string[]; watch: string[] };
 export function analyzeGroup(
   group: ReportGroup,
   blockedLogs: { blockedReason: string | null; date: Date }[],
-  emoEntries: { date: Date; tag: string | null; note: string }[] = []
+  emoEntries: { date: Date; tag: string | null; note: string }[] = [],
+  stopOrderLogs: StopOrderLog[] = []
 ): AnalysisResult {
   const good: string[] = [];
   const watch: string[] = [];
@@ -369,6 +415,14 @@ export function analyzeGroup(
     }
     const tagSummary = Object.entries(tagCounts).map(([tag, n]) => `${tag} x${n}`).join(", ");
     watch.push(`${emoEntries.length} Emotional Journal entr${emoEntries.length === 1 ? "y" : "ies"} logged this period${tagSummary ? ` (${tagSummary})` : ""} — worth reading alongside the trades above for direct context on what was actually going on.`);
+  }
+
+  const stopViolations = findStopComplianceViolations(group.trades, stopOrderLogs);
+  if (stopViolations.length > 0) {
+    const worstOverage = Math.max(...stopViolations.map((v) => v.overageBy));
+    watch.push(`${stopViolations.length} trade(s) exited past their own planned stop (worst: ${worstOverage.toFixed(2)} points beyond it) — the stop wasn't honored, only trades placed through the Trade Ticket are checked here.`);
+  } else if (stopOrderLogs.length > 0) {
+    good.push(`No stop-compliance violations found among trades with a recorded stop this period.`);
   }
 
   const addedToLoser = findAddedToLoserInstances(group.trades);
@@ -489,18 +543,20 @@ export async function generateAiAnalysis(
   group: ReportGroup,
   blockedLogs: { blockedReason: string | null; date: Date }[],
   reportLabel: string,
-  emoEntries: { date: Date; tag: string | null; note: string }[] = []
+  emoEntries: { date: Date; tag: string | null; note: string }[] = [],
+  stopOrderLogs: StopOrderLog[] = []
 ): Promise<AnalysisResult> {
   console.log(`[AI-ANALYSIS] called for ${reportLabel} — trades=${group.trades.length}, ANTHROPIC_API_KEY present=${!!process.env.ANTHROPIC_API_KEY}`);
   if (group.trades.length === 0) return { good: [], watch: [] };
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error("[AI-ANALYSIS] ANTHROPIC_API_KEY not set — falling back to deterministic analysis.");
-    return analyzeGroup(group, blockedLogs, emoEntries);
+    return analyzeGroup(group, blockedLogs, emoEntries, stopOrderLogs);
   }
 
   try {
     const addedToLoser = findAddedToLoserInstances(group.trades);
     const addedToWinner = findAddedToWinnerInstances(group.trades);
+    const stopViolations = findStopComplianceViolations(group.trades, stopOrderLogs);
     const maxConcurrent = Math.max(0, ...group.trades.map((t) => concurrentCount(group.trades, t) ?? 0));
 
     const holdMinutes = (t: ServerTrade) => {
@@ -553,9 +609,16 @@ export async function generateAiAnalysis(
         tag: e.tag,
         note: e.note,
       })),
+      stopComplianceViolations: stopViolations.map((v) => ({
+        symbol: v.trade.symbol,
+        dir: v.trade.dir,
+        plannedStop: v.plannedStop,
+        actualExit: v.trade.exit,
+        overageByPoints: Number(v.overageBy.toFixed(2)),
+      })),
     };
 
-    const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not. If emotionalJournalEntries is non-empty, treat it as the most valuable data here — it's the trader's own direct, self-reported account of what they were thinking/feeling, unlike everything else which is inferred from price/time data. Quote or closely paraphrase specific entries and connect them to specific trades/times where the timing lines up, rather than just noting entries exist.
+    const prompt = `You are analyzing a futures trader's ${reportLabel.toLowerCase()} trading data for an automated email report. Be specific and reference actual numbers, times, and prices from the data below — never vague generalities. Be direct and honest about problems, not just encouraging. This trader has an established pattern of tilt (rapid same-direction adds, averaging down) that a coaching conversation already identified, so weigh in on whether this period shows that pattern or not. If emotionalJournalEntries is non-empty, treat it as the most valuable data here — it's the trader's own direct, self-reported account of what they were thinking/feeling, unlike everything else which is inferred from price/time data. Quote or closely paraphrase specific entries and connect them to specific trades/times where the timing lines up, rather than just noting entries exist. If stopComplianceViolations is non-empty, call this out directly — it means a stop was actually set on that trade (through the app's own Trade Ticket) and the trader still let the exit go past it, which is a distinct and more serious failure than simply not using a stop at all.
 
 Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after the JSON object, in exactly this shape:
 {"good": ["specific observation 1", "specific observation 2"], "watch": ["specific concern 1", "specific concern 2"]}
@@ -598,7 +661,7 @@ ${JSON.stringify(facts)}`;
 
     if (!res.ok) {
       console.error("[AI-ANALYSIS] Anthropic API error:", res.status, await res.text());
-      return analyzeGroup(group, blockedLogs, emoEntries);
+      return analyzeGroup(group, blockedLogs, emoEntries, stopOrderLogs);
     }
 
     const body = await res.json();
@@ -625,6 +688,6 @@ ${JSON.stringify(facts)}`;
     } else {
       console.error("[AI-ANALYSIS] generation failed, falling back to deterministic:", err.message || err);
     }
-    return analyzeGroup(group, blockedLogs, emoEntries);
+    return analyzeGroup(group, blockedLogs, emoEntries, stopOrderLogs);
   }
 }

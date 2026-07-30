@@ -31,6 +31,38 @@ export async function POST(req: NextRequest) {
     settings = await prisma.settings.create({ data: { id: 1 } });
   }
 
+  // GUARD — post-loss cooldown, ANY symbol/direction. Every other guard in
+  // this file scopes to "adding to the same open position" — this one
+  // doesn't, because journal entries describing "Tilted / Revenge"
+  // behavior weren't limited to averaging into one losing trade; a loss on
+  // one symbol has repeatedly been followed by an impulsive new entry
+  // elsewhere. Deterministic (a real closed trade's real P&L, no
+  // fail-open/fail-closed ambiguity), so enforced identically on Demo and
+  // Live. 0 for either setting disables this guard entirely.
+  if (settings.postLossCooldownMinutes > 0 && settings.postLossCooldownThreshold > 0) {
+    const recentLoss = await prisma.trade.findFirst({
+      where: {
+        source: env,
+        pnl: { lte: -Math.abs(settings.postLossCooldownThreshold) },
+        date: { gte: new Date(Date.now() - settings.postLossCooldownMinutes * 60000) },
+      },
+      orderBy: { date: "desc" },
+    });
+    if (recentLoss) {
+      const minutesSince = (Date.now() - new Date(recentLoss.date).getTime()) / 60000;
+      const reason = `A ${recentLoss.symbol} trade closed for -$${Math.abs(recentLoss.pnl).toFixed(2)} ${minutesSince < 1 ? "under a minute" : `${Math.floor(minutesSince)} minute(s)`} ago \u2014 at or past your configured post-loss cooldown threshold of $${settings.postLossCooldownThreshold.toFixed(2)} (Settings \u2192 Post-Loss Cooldown). All new orders are paused for ${settings.postLossCooldownMinutes} minute(s) after a loss that size, regardless of symbol. Wait it out, or adjust the setting if this pace is genuinely intentional.`;
+      await prisma.tradovateOrderLog.create({
+        data: {
+          env, symbol, side: action, qty: parseInt(orderQty), orderType,
+          limitPrice: price ? parseFloat(price) : null,
+          status: "BLOCKED",
+          blockedReason: reason,
+        },
+      });
+      return NextResponse.json({ blocked: true, reason }, { status: 403 });
+    }
+  }
+
   // GUARD — fat-finger limit price sanity check (server-side backstop).
   // The Trade Ticket UI already asks for confirmation past a 3% deviation;
   // this is a hard block for a much larger deviation (25%+, e.g. a typo'd

@@ -74,6 +74,12 @@ model Settings {
   // about a minute, aimed at catching the trigger before the rest of the
   // sequence starts. 0 or null disables the check entirely.
   unrealizedLossAlertThreshold Float @default(500)
+  // Blocks ANY new order (any symbol, any direction) for N minutes after a
+  // realized loss of this size or worse — built specifically because
+  // journal entries described "Tilted / Revenge" behavior that isn't
+  // limited to averaging into the same losing position. 0 disables it.
+  postLossCooldownMinutes  Int   @default(5)
+  postLossCooldownThreshold Float @default(300)
 }
 
 model TradovateOrderLog {
