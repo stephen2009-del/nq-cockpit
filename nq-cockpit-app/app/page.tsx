@@ -862,7 +862,9 @@ function buildPreMarketPrepHtml(params: {
   const todayLabel = new Date().toDateString();
   // Top 3 strikes by OI, flagged as "walls" — same computation used
   // on-screen, so the export matches what you'd see live in the app.
-  const wallStrikes = new Set([...oiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => l.strike));
+  const topWalls = [...oiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+  const wallStrikes = new Set(topWalls.map((l) => l.strike));
+  const wallOiByStrike = new Map(topWalls.map((l) => [l.strike, l.oi]));
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
 <title>NQ Cockpit — Pre-Market Prep — ${todayLabel}</title>
@@ -926,7 +928,8 @@ function buildPreMarketPrepHtml(params: {
       ${ladderRows.map((row) => {
         const isWall = wallStrikes.has(row.qqq);
         const cls = row.isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : "";
-        const marker = row.isAnchor ? " \u2190 today" : isWall ? " \u2190 WALL" : "";
+        const oiVal = wallOiByStrike.get(row.qqq);
+        const marker = row.isAnchor ? " \u2190 today" : isWall ? ` \u2190 WALL (${oiVal?.toLocaleString()} OI)` : "";
         return `<tr${cls}><td>${row.qqq.toFixed(2)}${marker}</td><td>${row.nq.toFixed(2)}</td></tr>`;
       }).join("")}
     </tbody>
@@ -991,9 +994,9 @@ function PreMarketTab({
   // point of logging 40 strikes is knowing which 2-3 of them actually
   // matter without having to eyeball a dense screenshot every time.
   const todayLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
-  const wallStrikes = new Set(
-    [...todayLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => l.strike)
-  );
+  const topWalls = [...todayLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+  const wallStrikes = new Set(topWalls.map((l) => l.strike));
+  const wallOiByStrike = new Map(topWalls.map((l) => [l.strike, l.oi]));
 
   async function runChainParse(payload: { imageBase64?: string; mediaType?: string; text?: string }) {
     setChainBusy(true);
@@ -1126,7 +1129,8 @@ function PreMarketTab({
                       }
                     >
                       <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
-                        {row.qqq.toFixed(2)}{row.isAnchor ? "  ← today" : isWall ? "  ← WALL" : matchedLevel ? "  ← OI logged" : ""}
+                        {row.qqq.toFixed(2)}
+                        {row.isAnchor ? "  ← today" : isWall ? `  ← WALL (${wallOiByStrike.get(row.qqq)?.toLocaleString()} OI)` : matchedLevel ? `  ← OI logged (${matchedLevel.oi.toLocaleString()})` : ""}
                       </td>
                       <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
                         {row.nq.toFixed(2)}
@@ -1534,7 +1538,9 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     // Top 3 today's OI levels by OI — same "wall" computation as
     // Pre-Market Prep, so a strike flagged there shows up here too.
     const todayOiLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
-    const wallStrikes = new Set([...todayOiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => Math.round(l.strike)));
+    const topWalls = [...todayOiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+    const wallStrikes = new Set(topWalls.map((l) => Math.round(l.strike)));
+    const wallOiByStrike = new Map(topWalls.map((l) => [Math.round(l.strike), l.oi]));
 
     const rowsFor = (levels: number[]) =>
       levels
@@ -1543,7 +1549,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
           const isWall = wallStrikes.has(level);
           const isBound = level === highBoundLevel || level === lowBoundLevel;
           const cls = isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : isBound ? ' class="bound-row"' : "";
-          const marker = isAnchor ? " \u2190 anchor" : isWall ? " \u2190 WALL" : isBound ? " \u2190 \u00b1move" : "";
+          const marker = isAnchor ? " \u2190 anchor" : isWall ? ` \u2190 WALL (${wallOiByStrike.get(level)?.toLocaleString()} OI)` : isBound ? " \u2190 \u00b1move" : "";
           return `<tr${cls}><td>${level.toFixed(2)}${marker}</td><td>${(level * mult).toFixed(2)}</td></tr>`;
         })
         .join("");
