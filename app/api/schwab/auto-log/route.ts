@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQuote } from "@/lib/schwab";
 import { prisma } from "@/lib/prisma";
+import { tradingDayStart } from "@/lib/tradingWindow";
 
 // Tries several plausible shapes for Schwab's quote response, since the
 // exact field name wasn't independently confirmed before building this
@@ -47,7 +48,7 @@ export async function GET(req: NextRequest) {
     }
 
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfDay = tradingDayStart(now);
     const todayPrep = await prisma.preMarketPrep.findFirst({
       where: { date: { gte: startOfDay } },
       orderBy: { date: "desc" },

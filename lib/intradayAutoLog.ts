@@ -1,6 +1,6 @@
 import { getQuote } from "@/lib/alpaca";
 import { prisma } from "@/lib/prisma";
-import { currentEtMinutes } from "@/lib/tradingWindow";
+import { currentEtMinutes, tradingDayStart } from "@/lib/tradingWindow";
 
 // Alpaca's documented quote shape is { "quotes": { "QQQ": { "ap": askPrice,
 // "bp": bidPrice, ... } } }. Uses the bid/ask midpoint as "current price" —
@@ -50,14 +50,9 @@ export async function runIntradayAutoLog(now: Date = new Date()): Promise<Intrad
       return { ok: false, error: "Could not find a price field in Alpaca's quote response \u2014 field name guess didn't match." };
     }
 
-    // Uses the ET calendar day (not the server's raw local timezone) to look
-    // up today's multiplier, for the same reason the order-guard's "today"
-    // boundary was fixed earlier.
-    const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
-    const y = parts.find((p) => p.type === "year")!.value;
-    const m = parts.find((p) => p.type === "month")!.value;
-    const d = parts.find((p) => p.type === "day")!.value;
-    const startOfDayEt = new Date(`${y}-${m}-${d}T00:00:00-04:00`); // rough ET bound, fine for a "today" lookup
+    // Uses the shared trading-day boundary (6pm ET rollover) instead of a
+    // rough hardcoded EDT offset, for consistency with the rest of the app.
+    const startOfDayEt = tradingDayStart(now);
 
     const todayPrep = await prisma.preMarketPrep.findFirst({
       where: { date: { gte: startOfDayEt } },

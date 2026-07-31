@@ -18,6 +18,7 @@ export async function POST(req: NextRequest) {
       session: body.session,
       entry: body.entry ? parseFloat(body.entry) : null,
       exit: body.exit ? parseFloat(body.exit) : null,
+      entryDate: body.entryDate ? new Date(body.entryDate) : null,
       size: body.size ? parseFloat(body.size) : null,
       pnl: parseFloat(body.pnl),
       setup: body.setup,

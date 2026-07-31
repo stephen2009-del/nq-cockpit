@@ -22,6 +22,10 @@ model Trade {
   session           String
   entry             Float?
   exit              Float?
+  // Separate from `date` (which is exit time for synced trades) — lets
+  // hold time actually be computed. Null for manual entries and anything
+  // synced before this field existed.
+  entryDate         DateTime?
   size              Float?
   pnl               Float
   setup             String?
@@ -49,6 +53,33 @@ model Settings {
   openingBufferMinutes Int    @default(10)
   tradovateEnv         String @default("demo")
   tradingWindowLocked  Boolean @default(false)
+  // Pins a specific account per environment, for when more than one exists
+  // (e.g. Live has two accounts but only one is actually active). Null
+  // means "auto-select if there's only one account, otherwise ask."
+  liveAccountId        String?
+  demoAccountId        String?
+  // Hard caps on adding to an already-open same-direction position, built
+  // after a week's report showed up to 11 concurrent longs stacked with a
+  // ~1-minute median gap between adds. Unlike the P&L-based losing-position
+  // guard, these are deterministic counts/timers enforced identically on
+  // demo and live — there's no "can't verify" case to fail open on.
+  maxConcurrentAdds    Int    @default(2) // max net contracts allowed in one direction, per symbol
+  addOnCooldownMinutes Int    @default(3) // minimum minutes between same-direction entries in a symbol
+  // Real-time unrealized-loss alert threshold (dollars, positive number) —
+  // built after a specific admitted pattern: trade goes against the
+  // trader, they go disable Tradovate's own daily loss limit directly (a
+  // path this app can't see or block), then add to the loser. This can't
+  // stop that sequence, but it can shrink the gap between "this trade
+  // just went underwater" and "I know that" from a full day down to
+  // about a minute, aimed at catching the trigger before the rest of the
+  // sequence starts. 0 or null disables the check entirely.
+  unrealizedLossAlertThreshold Float @default(500)
+  // Blocks ANY new order (any symbol, any direction) for N minutes after a
+  // realized loss of this size or worse — built specifically because
+  // journal entries described "Tilted / Revenge" behavior that isn't
+  // limited to averaging into the same losing position. 0 disables it.
+  postLossCooldownMinutes  Int   @default(5)
+  postLossCooldownThreshold Float @default(300)
 }
 
 model TradovateOrderLog {
@@ -64,6 +95,10 @@ model TradovateOrderLog {
   targetPrice    Float?
   status         String
   blockedReason  String?
+  addReason      String?  // why you added to an already-open same-direction position — captured
+                          // at order time via a required prompt in the Trade Ticket, specifically
+                          // to fill the gap where synced Tradovate fills otherwise carry zero
+                          // self-reported context (unlike manually-logged Journal entries).
   tradovateOrderId String?
   rawResponse    Json?
 }
@@ -116,8 +151,17 @@ model StopManagementRule {
   direction      String    // "long" or "short"
   entryPrice     Float
   qty            Int
-  triggerOffset  Float     // points from entry that trigger the move
-  newStopOffset  Float     // points from entry for the new stop price
+  triggerOffset  Float     // points from entry that trigger the move (or, in "trail" mode, the profit needed to activate trailing)
+  newStopOffset  Float?    // points from entry for the new stop price — "oneshot" mode only
+  // Auto Trail fields (Tradovate ATM-style continuous trailing) — "trail"
+  // mode only. Once profit crosses triggerOffset, the stop ratchets to
+  // stay trailAmount behind the best price seen, re-checked every time
+  // price advances another checkFrequency points. Never loosens.
+  mode             String  @default("oneshot") // "oneshot" | "trail"
+  trailAmount      Float?
+  checkFrequency   Float?
+  lastRatchetPrice Float?
+  ratchetCount     Int     @default(0)
   status         String    @default("active") // active | triggered | failed | cancelled
   triggeredAt    DateTime?
   newStopPrice   Float?
@@ -132,4 +176,13 @@ model SchwabToken {
   accessExpiresAt DateTime
   refreshExpiresAt DateTime
   updatedAt    DateTime @updatedAt
+}
+
+// Chart screenshots (e.g. from Thinkorswim) uploaded during the day as a
+// reminder of good/bad trades. Grouped into reports by date.
+model ChartSnapshot {
+  id        Int      @id @default(autoincrement())
+  date      DateTime @default(now())
+  note      String?
+  imageData String   // base64 data URI, resized/compressed client-side before upload
 }

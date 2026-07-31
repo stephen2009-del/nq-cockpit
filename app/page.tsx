@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
-import { getTradingWindowStatus } from "@/lib/tradingWindow";
+import { getTradingWindowStatus, tradingDayKey, weekStartKey } from "@/lib/tradingWindow";
 import { matchFillsToTrades, MatchedTrade, analyzeHoldTimes } from "@/lib/fifoMatch";
 
 type Rule = { id: number; text: string; order: number };
@@ -14,6 +14,7 @@ type Trade = {
   session: string;
   entry: number | null;
   exit: number | null;
+  entryDate: string | null; // separate from `date` (exit time for synced trades) — null if unknown (manual entries, pre-existing synced trades)
   size: number | null;
   pnl: number;
   setup: string | null;
@@ -24,6 +25,12 @@ type Trade = {
   checklistSnapshot: { rule: string; passed: boolean }[];
   plannedStop: number | null;
   plannedTarget: number | null;
+};
+type ChartSnapshot = {
+  id: number;
+  date: string;
+  note: string | null;
+  imageData: string;
 };
 type Settings = {
   id: number;
@@ -36,6 +43,13 @@ type Settings = {
   openingBufferMinutes: number;
   tradovateEnv: string;
   tradingWindowLocked: boolean;
+  liveAccountId: string | null;
+  demoAccountId: string | null;
+  maxConcurrentAdds: number;
+  addOnCooldownMinutes: number;
+  unrealizedLossAlertThreshold: number;
+  postLossCooldownMinutes: number;
+  postLossCooldownThreshold: number;
 };
 type PreMarketPrep = { id: number; date: string; qqqPrice: number; multiplier: number; estimatedMove: number; nqPrice: number; openInterestNotes: string | null };
 type OILevel = { id: number; date: string; strike: number; oi: number; note: string | null };
@@ -96,6 +110,23 @@ function analyzeTradeDiscipline(t: Trade): DisciplineFlag[] {
 // used as an actual limit price needs to snap to a real tradable tick first.
 function roundToTick(price: number, tick: number = 0.25): number {
   return Math.round(price / tick) * tick;
+}
+
+// Default stop/target distances, applied automatically off whatever price
+// the Trade Ticket resolves to — 18 points against you, 29 points in your
+// favor, mirrored for the trade's direction (a Buy's stop sits below entry
+// and target above; a Sell is the reverse). Still ordinary editable text
+// inputs afterward, so a specific trade can override either number right
+// up until submit — this only sets the starting point instead of leaving
+// both blank.
+const DEFAULT_STOP_POINTS = 47.5; // matches the user's actual Tradovate ATM template
+const DEFAULT_TARGET_POINTS = 29;
+function computeStopTarget(priceStr: string, action: string): { stopLoss: string; target: string } {
+  const p = parseFloat(priceStr);
+  if (isNaN(p)) return { stopLoss: "", target: "" };
+  const stop = action === "Sell" ? p + DEFAULT_STOP_POINTS : p - DEFAULT_STOP_POINTS;
+  const tgt = action === "Sell" ? p - DEFAULT_TARGET_POINTS : p + DEFAULT_TARGET_POINTS;
+  return { stopLoss: String(roundToTick(stop)), target: String(roundToTick(tgt)) };
 }
 
 function addMinutesLabel(hhmm: string, deltaMinutes: number): string {
@@ -169,7 +200,7 @@ export default function Page() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [settings, setSettings] = useState<Settings>({
     id: 1, dailyLossLimit: 500, contract: "NQ", multiplier: 20,
-    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false,
+    tradingWindowStart: "09:30", tradingWindowEnd: "16:00", cutoffMinutesBeforeClose: 65, openingBufferMinutes: 10, tradovateEnv: "demo", tradingWindowLocked: false, liveAccountId: null, demoAccountId: null, maxConcurrentAdds: 2, addOnCooldownMinutes: 3, unrealizedLossAlertThreshold: 500, postLossCooldownMinutes: 5, postLossCooldownThreshold: 300,
   });
   const [checked, setChecked] = useState<Record<number, boolean>>({});
   const [tab, setTab] = useState<"premarket" | "intraday" | "emojournal" | "tradeticket" | "tvanalytics" | "checklist" | "journal" | "dashboard" | "reports" | "settings">("premarket");
@@ -178,9 +209,11 @@ export default function Page() {
   const [oiLevels, setOiLevels] = useState<OILevel[]>([]);
   const [oiForm, setOiForm] = useState({ strike: "", oi: "", note: "" });
   const [intradayChecks, setIntradayChecks] = useState<IntradayCheckT[]>([]);
+  const [snapshots, setSnapshots] = useState<ChartSnapshot[]>([]);
   const [emoEntries, setEmoEntries] = useState<EmotionalEntry[]>([]);
   const [emoForm, setEmoForm] = useState({ tag: "", note: "" });
   const [intradayInput, setIntradayInput] = useState("");
+  const [intradayNqInput, setIntradayNqInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [viewTradeId, setViewTradeId] = useState<number | null>(null);
   const [newRuleText, setNewRuleText] = useState("");
@@ -188,12 +221,13 @@ export default function Page() {
 
   const [form, setForm] = useState({
     symbol: "NQ", dir: "long", session: "NY Open", entry: "", exit: "", size: "1",
+    entryTime: "", exitTime: "",
     pnl: "", setup: "", emotion: "Calm / neutral", notes: "", plannedStop: "", plannedTarget: "",
   });
 
   async function loadAll() {
     setLoading(true);
-    const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
+    const [r1, r2, r3, r4, r5, r6, r7, r8] = await Promise.all([
       fetch("/api/rules").then((r) => r.json()),
       fetch("/api/trades").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
@@ -201,6 +235,7 @@ export default function Page() {
       fetch("/api/oi-levels").then((r) => r.json()),
       fetch("/api/intraday").then((r) => r.json()),
       fetch("/api/emotional-log").then((r) => r.json()),
+      fetch("/api/snapshots").then((r) => r.json()),
     ]);
     setRules(r1);
     setTrades(r2);
@@ -213,8 +248,9 @@ export default function Page() {
     setOiLevels(r5);
     setIntradayChecks(r6);
     setEmoEntries(r7);
-    const today = new Date().toDateString();
-    const todayEntry = r4.find((p: PreMarketPrep) => new Date(p.date).toDateString() === today);
+    setSnapshots(r8);
+    const today = tradingDayKey(new Date());
+    const todayEntry = r4.find((p: PreMarketPrep) => tradingDayKey(new Date(p.date)) === today);
     if (todayEntry) {
       setPreMarketForm({
         qqqPrice: String(todayEntry.qqqPrice),
@@ -228,6 +264,19 @@ export default function Page() {
 
   useEffect(() => {
     loadAll();
+  }, []);
+
+  // The Alpaca-backed Intraday auto-log cron writes a new check every minute
+  // during regular market hours, but until now nothing on the client ever
+  // re-fetched it after the initial page load — meaning a tab left open all
+  // day silently showed a stale first-load snapshot. This keeps
+  // intradayChecks (and anything derived from it, like the Expected Move
+  // tracker below) actually current without requiring a manual reload.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch("/api/intraday").then((r) => r.json()).then(setIntradayChecks).catch(() => {});
+    }, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -255,8 +304,8 @@ export default function Page() {
   const envFilteredTrades = trades.filter((t) => t.source === "manual" || t.source === settings.tradovateEnv);
   const ratedTrades = envFilteredTrades.filter((t) => t.disciplined !== null);
   const disciplineScore = ratedTrades.length ? Math.round((ratedTrades.filter((t) => t.disciplined).length / ratedTrades.length) * 100) : null;
-  const today = new Date().toDateString();
-  const todaysTrades = envFilteredTrades.filter((t) => new Date(t.date).toDateString() === today);
+  const today = tradingDayKey(new Date());
+  const todaysTrades = envFilteredTrades.filter((t) => tradingDayKey(new Date(t.date)) === today);
   const todaysPnl = todaysTrades.reduce((s, t) => s + t.pnl, 0);
   let streak = 0;
   for (let i = envFilteredTrades.length - 1; i >= 0; i--) {
@@ -295,6 +344,14 @@ export default function Page() {
     if (isNaN(pnl)) { alert("Enter a P&L amount (or fill entry/exit/contracts to auto-calc)."); return; }
     const disciplined = rules.every((r) => checked[r.id]);
     const checklistSnapshot = rules.map((r) => ({ rule: r.text, passed: !!checked[r.id] }));
+    // Entry/Exit Time fields are just a time-of-day (HH:MM) — assumes the
+    // trade happened today, since this form is for logging trades as you
+    // take them, not backdating old ones. Left blank, entryDate stays null
+    // (hold time won't be available for this trade) and date defaults to
+    // "now" server-side, same as before these fields existed.
+    const todayStr = new Date().toDateString();
+    const entryDateIso = form.entryTime ? new Date(`${todayStr} ${form.entryTime}`).toISOString() : undefined;
+    const exitDateIso = form.exitTime ? new Date(`${todayStr} ${form.exitTime}`).toISOString() : undefined;
     const trade = await fetch("/api/trades", {
       method: "POST", headers: { "Content-Type": "application/json" },
       // Tags this entry with whichever Tradovate account (Demo/Live) is
@@ -302,13 +359,17 @@ export default function Page() {
       // trade defaulted to the generic "manual" tag regardless of account,
       // which made the Demo/Live filter on the top summary bar and
       // Dashboard a no-op for almost all real usage.
-      body: JSON.stringify({ ...form, pnl, disciplined, checklistSnapshot, source: settings.tradovateEnv }),
+      body: JSON.stringify({
+        ...form, pnl, disciplined, checklistSnapshot, source: settings.tradovateEnv,
+        ...(entryDateIso ? { entryDate: entryDateIso } : {}),
+        ...(exitDateIso ? { date: exitDateIso } : {}),
+      }),
     }).then((r) => r.json());
     setTrades((t) => [...t, trade]);
     const c: Record<number, boolean> = {};
     rules.forEach((r) => (c[r.id] = false));
     setChecked(c);
-    setForm((f) => ({ ...f, entry: "", exit: "", pnl: "", setup: "", notes: "", plannedStop: "", plannedTarget: "" }));
+    setForm((f) => ({ ...f, entry: "", exit: "", entryTime: "", exitTime: "", pnl: "", setup: "", notes: "", plannedStop: "", plannedTarget: "" }));
     setConfirmMsg("✓ Trade logged.");
     setTimeout(() => setConfirmMsg(null), 2500);
   }
@@ -355,14 +416,27 @@ export default function Page() {
   }
 
   async function addIntradayCheck() {
-    const qqqPrice = parseFloat(intradayInput);
-    if (isNaN(qqqPrice)) {
-      alert("Enter a QQQ price.");
-      return;
-    }
     const multiplier = parseFloat(preMarketForm.multiplier);
     if (isNaN(multiplier)) {
       alert("Enter today's NQ/QQQ multiplier on the Pre-Market tab first.");
+      return;
+    }
+    // Accepts either field — QQQ (the normal daytime case) or NQ directly.
+    // NQ trades nearly 24/5 on Globex but QQQ only trades equity hours, so
+    // during the overnight session you're watching an actual NQ number on
+    // your own chart, not a QQQ one — forcing a back-calculated, fictional
+    // QQQ price into that field just to log a check was backwards. Whichever
+    // one you fill in, the other is derived from it via today's multiplier,
+    // same as always.
+    const qqqTyped = parseFloat(intradayInput);
+    const nqTyped = parseFloat(intradayNqInput);
+    let qqqPrice: number;
+    if (!isNaN(qqqTyped)) {
+      qqqPrice = qqqTyped;
+    } else if (!isNaN(nqTyped)) {
+      qqqPrice = nqTyped / multiplier;
+    } else {
+      alert("Enter a QQQ price, or an NQ price directly (useful overnight when QQQ isn't trading).");
       return;
     }
     const check = await fetch("/api/intraday", {
@@ -371,6 +445,59 @@ export default function Page() {
     }).then((r) => r.json());
     setIntradayChecks((c) => [...c, check]);
     setIntradayInput("");
+    setIntradayNqInput("");
+  }
+
+  // Resizes/compresses an uploaded image client-side before it ever reaches
+  // the server — otherwise a full-res phone screenshot (often several MB)
+  // would go straight into Postgres as base64, and that adds up fast over
+  // daily use. Caps the longest side at 1000px and re-encodes as JPEG at
+  // 80% quality, which is plenty to read a chart but a fraction of the size.
+  function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 1000;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return reject(new Error("Canvas not supported"));
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL("image/jpeg", 0.8));
+        };
+        img.onerror = reject;
+        img.src = reader.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addSnapshot(file: File, note: string) {
+    const imageData = await compressImage(file);
+    const snapshot = await fetch("/api/snapshots", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageData, note: note || null }),
+    }).then((r) => r.json());
+    setSnapshots((s) => [snapshot, ...s]);
+  }
+
+  async function deleteSnapshot(id: number) {
+    if (!confirm("Delete this snapshot?")) return;
+    await fetch(`/api/snapshots/${id}`, { method: "DELETE" });
+    setSnapshots((s) => s.filter((x) => x.id !== id));
+  }
+
+  async function updateSnapshotNote(id: number, note: string) {
+    const updated = await fetch(`/api/snapshots/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note || null }),
+    }).then((r) => r.json());
+    setSnapshots((s) => s.map((x) => (x.id === id ? updated : x)));
   }
 
   async function addOiLevel() {
@@ -396,11 +523,23 @@ export default function Page() {
     setOiLevels((l) => l.filter((x) => x.id !== id));
   }
 
+  // Called after a bulk chain upload/paste replaces today's Open Interest
+  // Levels server-side (parse-chain deletes-then-recreates for today) —
+  // just swaps the client's copy for whatever the server now actually has,
+  // same pattern as loadAll() but scoped to this one table.
+  function handleLevelsReplaced(newLevels: OILevel[]) {
+    setOiLevels((existing) => {
+      const todayKey = tradingDayKey(new Date());
+      const keepOthers = existing.filter((l) => tradingDayKey(new Date(l.date)) !== todayKey);
+      return [...newLevels, ...keepOthers];
+    });
+  }
+
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
-  const todayStr = new Date().toDateString();
-  const latestIntradayToday = [...intradayChecks].reverse().find((c) => new Date(c.date).toDateString() === todayStr);
-  const todayPrepForForm = preMarketHistory.find((p) => new Date(p.date).toDateString() === todayStr);
+  const todayStr = tradingDayKey(new Date());
+  const latestIntradayToday = [...intradayChecks].reverse().find((c) => tradingDayKey(new Date(c.date)) === todayStr);
+  const todayPrepForForm = preMarketHistory.find((p) => tradingDayKey(new Date(p.date)) === todayStr);
   const journalLastKnownPrice = latestIntradayToday?.nqPrice ?? todayPrepForForm?.nqPrice ?? null;
 
   const RISK_TAGS = ["FOMO", "Tilted / Revenge", "Overconfident", "Doubt"];
@@ -431,27 +570,27 @@ export default function Page() {
 
       <div className="strip">
         <div className="gauge-card">
-          <div className="card-label">Discipline Gauge</div>
+          <div className="card-label">Discipline Gauge — All-Time ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className="dial-wrap">
             <Dial score={disciplineScore} color={scoreColor} />
             <div>
               <div className="dial-num" style={{ color: scoreColor }}>{disciplineScore === null ? "—" : disciplineScore + "%"}</div>
-              <div className="card-sub">{trades.length} trades logged</div>
+              <div className="card-sub">{ratedTrades.length} rated trade(s) ({envFilteredTrades.length} total)</div>
             </div>
           </div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Today's P&amp;L</div>
+          <div className="card-label">Today's P&amp;L ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${todaysPnl > 0 ? "pos" : todaysPnl < 0 ? "neg" : ""}`}>{fmtMoney(todaysPnl)}</div>
           <div className="card-sub">{todaysTrades.length} trade(s) today</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Discipline Streak</div>
+          <div className="card-label">Discipline Streak — All-Time ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${streak > 0 ? "pos" : ""}`}>{streak}</div>
           <div className="card-sub">consecutive clean trades</div>
         </div>
         <div className="gauge-card">
-          <div className="card-label">Daily Loss Limit</div>
+          <div className="card-label">Daily Loss Limit — Today ({settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} + manual)</div>
           <div className={`card-value ${lossPct >= 100 ? "neg" : lossPct >= 70 ? "warn" : ""}`}>{fmtMoney(-lossUsed)} / {fmtMoney(-limit)}</div>
           <div className="bar-track"><div className="bar-fill" style={{ width: `${lossPct}%`, background: lossPct >= 100 ? "var(--red)" : lossPct >= 70 ? "var(--amber)" : "var(--cyan)" }} /></div>
         </div>
@@ -467,18 +606,24 @@ export default function Page() {
 
       {confirmMsg && <div className="status-banner status-clear">{confirmMsg}</div>}
 
-      {tab === "tradeticket" && <TradeTicketTab settings={settings} />}
-      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} />}
+      {tab === "tradeticket" && <TradeTicketTab settings={settings} trades={trades} />}
+      {tab === "tvanalytics" && <TVAnalyticsTab settings={settings} trades={trades} onTradeSynced={(t) => setTrades((prev) => [...prev, t])} onTradeUpdated={(t) => setTrades((prev) => prev.map((p) => (p.id === t.id ? t : p)))} />}
       {tab === "emojournal" && <EmotionalJournalTab form={emoForm} setForm={setEmoForm} onSave={addEmoEntry} entries={emoEntries} />}
 
       {tab === "intraday" && (
         <IntradayTab
           input={intradayInput}
           setInput={setIntradayInput}
+          nqInput={intradayNqInput}
+          setNqInput={setIntradayNqInput}
           onCheck={addIntradayCheck}
           checks={intradayChecks}
-          todayPrep={preMarketHistory.find((p) => new Date(p.date).toDateString() === new Date().toDateString()) || null}
+          todayPrep={preMarketHistory.find((p) => tradingDayKey(new Date(p.date)) === tradingDayKey(new Date())) || null}
           oiLevels={oiLevels}
+          snapshots={snapshots}
+          addSnapshot={addSnapshot}
+          deleteSnapshot={deleteSnapshot}
+          updateSnapshotNote={updateSnapshotNote}
         />
       )}
 
@@ -493,10 +638,11 @@ export default function Page() {
           setOiForm={setOiForm}
           onAddOi={addOiLevel}
           onDeleteOi={deleteOiLevel}
+          onLevelsReplaced={handleLevelsReplaced}
         />
       )}
 
-      {tab === "reports" && <ReportsTab trades={trades} />}
+      {tab === "reports" && <ReportsTab trades={trades} snapshots={snapshots} emoEntries={emoEntries} settings={settings} />}
 
       {tab === "checklist" && (
         <>
@@ -562,6 +708,19 @@ export default function Page() {
                 )}
               </div>
               <div className="field"><label>Contracts</label><input type="number" min="1" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} /></div>
+            </div>
+            <div className="grid2">
+              <div className="field">
+                <label>Entry Time (optional)</label>
+                <input type="time" value={form.entryTime} onChange={(e) => setForm({ ...form, entryTime: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Exit Time (optional)</label>
+                <input type="time" value={form.exitTime} onChange={(e) => setForm({ ...form, exitTime: e.target.value })} />
+              </div>
+            </div>
+            <div className="panel-desc" style={{ marginTop: -8 }}>
+              Both optional — fill them in and Hold Time will show correctly in Reports and the Journal. Leave blank and it'll show — same as before these fields existed. Assumes today's date (this form is for logging trades as you take them, not backdating old ones).
             </div>
             <div className="grid2">
               <div className="field"><label>P&amp;L ($) — auto or manual</label><input type="number" step="0.01" value={form.pnl} onChange={(e) => setForm({ ...form, pnl: e.target.value })} /></div>
@@ -663,7 +822,7 @@ export default function Page() {
         </div>
       )}
 
-      {tab === "dashboard" && <Dashboard trades={envFilteredTrades} emoEntries={emoEntries} />}
+      {tab === "dashboard" && <Dashboard trades={envFilteredTrades} allTrades={trades} emoEntries={emoEntries} envLabel={settings.tradovateEnv === "live" ? "LIVE" : "DEMO"} />}
 
       {tab === "settings" && <SettingsPanel settings={settings} onSave={saveSettings} />}
 
@@ -686,6 +845,98 @@ function Dial({ score, color }: { score: number | null; color: string }) {
   );
 }
 
+function buildPreMarketPrepHtml(params: {
+  qqq: number;
+  mult: number;
+  move: number;
+  nqPrice: number;
+  nqLow: number;
+  nqHigh: number;
+  qqqLow: number;
+  qqqHigh: number;
+  openInterestNotes: string;
+  oiLevels: OILevel[];
+  ladderRows: { qqq: number; nq: number; isAnchor: boolean }[];
+}): string {
+  const { qqq, mult, move, nqPrice, nqLow, nqHigh, qqqLow, qqqHigh, openInterestNotes, oiLevels, ladderRows } = params;
+  const todayLabel = new Date().toDateString();
+  // Top 3 strikes by OI, flagged as "walls" — same computation used
+  // on-screen, so the export matches what you'd see live in the app.
+  const topWalls = [...oiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+  const wallStrikes = new Set(topWalls.map((l) => l.strike));
+  const wallOiByStrike = new Map(topWalls.map((l) => [l.strike, l.oi]));
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<title>NQ Cockpit — Pre-Market Prep — ${todayLabel}</title>
+<style>
+  body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:24px;}
+  h1{color:#F5A623;font-size:20px;margin:0 0 4px;}
+  h2{color:#3FD0C9;font-size:15px;margin:24px 0 8px;}
+  .sub{color:#7F8CA6;margin:0 0 16px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:12px;}
+  th{text-align:left;padding:6px 10px;color:#7F8CA6;border-bottom:1px solid #263654;}
+  td{padding:6px 10px;border-bottom:1px solid #1a2540;}
+  .stat-grid{display:flex;gap:32px;flex-wrap:wrap;margin-bottom:8px;}
+  .stat .label{color:#7F8CA6;font-size:11px;}
+  .stat .value{font-size:19px;font-weight:bold;}
+  .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  .wall-row td{background:rgba(229,72,77,0.15);color:#E5484D;font-weight:bold;}
+  @media print {
+    body{background:#fff;color:#000;}
+    h1,h2{color:#000;}
+    th{color:#555;border-bottom-color:#ccc;}
+    td{border-bottom-color:#eee;}
+    .stat .label{color:#666;}
+    .anchor-row td{background:#f0f0f0;color:#000;}
+    .wall-row td{background:#fbe4e4;color:#a12020;}
+  }
+</style>
+</head>
+<body>
+  <h1>NQ COCKPIT — Pre-Market Prep</h1>
+  <p class="sub">${todayLabel}</p>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="label">QQQ PRICE</div><div class="value">${qqq.toFixed(2)}</div></div>
+    <div class="stat"><div class="label">MULTIPLIER</div><div class="value">${mult}</div></div>
+    <div class="stat"><div class="label">ESTIMATED MOVE (QQQ)</div><div class="value">\u00b1${move}</div></div>
+    <div class="stat"><div class="label">CALCULATED NQ PRICE</div><div class="value" style="color:#3FD0C9;">${nqPrice.toFixed(2)}</div></div>
+  </div>
+
+  <h2>Projected Ranges</h2>
+  <table>
+    <thead><tr><th></th><th>Low</th><th>Anchor</th><th>High</th></tr></thead>
+    <tbody>
+      <tr><td>NQ</td><td>${nqLow.toFixed(2)}</td><td>${nqPrice.toFixed(2)}</td><td>${nqHigh.toFixed(2)}</td></tr>
+      <tr><td>QQQ</td><td>${qqqLow.toFixed(2)}</td><td>${qqq.toFixed(2)}</td><td>${qqqHigh.toFixed(2)}</td></tr>
+    </tbody>
+  </table>
+
+  ${openInterestNotes ? `<h2>Open Interest Notes</h2><p>${openInterestNotes}</p>` : ""}
+
+  ${oiLevels.length ? `
+  <h2>Open Interest Levels</h2>
+  <table>
+    <thead><tr><th>Strike</th><th>OI</th><th>Note</th></tr></thead>
+    <tbody>${oiLevels.map((l) => `<tr${wallStrikes.has(l.strike) ? ' class="wall-row"' : ""}><td>${l.strike}${wallStrikes.has(l.strike) ? " \u2190 WALL" : ""}</td><td>${l.oi.toLocaleString()}</td><td>${l.note || "\u2014"}</td></tr>`).join("")}</tbody>
+  </table>` : ""}
+
+  <h2>QQQ / NQ Price Ladder</h2>
+  <table>
+    <thead><tr><th>QQQ</th><th>NQ</th></tr></thead>
+    <tbody>
+      ${ladderRows.map((row) => {
+        const isWall = wallStrikes.has(row.qqq);
+        const cls = row.isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : "";
+        const oiVal = wallOiByStrike.get(row.qqq);
+        const marker = row.isAnchor ? " \u2190 today" : isWall ? ` \u2190 WALL (${oiVal?.toLocaleString()} OI)` : "";
+        return `<tr${cls}><td>${row.qqq.toFixed(2)}${marker}</td><td>${row.nq.toFixed(2)}</td></tr>`;
+      }).join("")}
+    </tbody>
+  </table>
+</body></html>`;
+}
+
 function PreMarketTab({
   form,
   setForm,
@@ -696,6 +947,7 @@ function PreMarketTab({
   setOiForm,
   onAddOi,
   onDeleteOi,
+  onLevelsReplaced,
 }: {
   form: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string };
   setForm: (f: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string }) => void;
@@ -706,6 +958,7 @@ function PreMarketTab({
   setOiForm: (f: { strike: string; oi: string; note: string }) => void;
   onAddOi: () => void;
   onDeleteOi: (id: number) => void;
+  onLevelsReplaced: (levels: OILevel[]) => void;
 }) {
   const qqq = parseFloat(form.qqqPrice);
   const mult = parseFloat(form.multiplier);
@@ -733,6 +986,50 @@ function PreMarketTab({
     }
   }
 
+  const [chainBusy, setChainBusy] = useState(false);
+  const [chainText, setChainText] = useState("");
+  const [chainMode, setChainMode] = useState<"image" | "text">("image");
+
+  // Today's levels, sorted, top 3 by OI flagged as "walls" — the whole
+  // point of logging 40 strikes is knowing which 2-3 of them actually
+  // matter without having to eyeball a dense screenshot every time.
+  const todayLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
+  const topWalls = [...todayLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+  const wallStrikes = new Set(topWalls.map((l) => l.strike));
+  const wallOiByStrike = new Map(topWalls.map((l) => [l.strike, l.oi]));
+
+  async function runChainParse(payload: { imageBase64?: string; mediaType?: string; text?: string }) {
+    setChainBusy(true);
+    try {
+      const res = await fetch("/api/premarket/parse-chain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        alert(body.error || "Couldn't parse the chain.");
+        return;
+      }
+      onLevelsReplaced(body.levels);
+      setChainText("");
+      alert(`Logged ${body.count} strike(s) from the chain. Top 3 by OI are now flagged as walls below.`);
+    } catch (err: any) {
+      alert(`Chain parse failed: ${err.message || err}`);
+    } finally {
+      setChainBusy(false);
+    }
+  }
+
+  function handleChainFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1];
+      runChainParse({ imageBase64: base64, mediaType: file.type || "image/png" });
+    };
+    reader.readAsDataURL(file);
+  }
   return (
     <>
       <div className="panel-box">
@@ -768,8 +1065,43 @@ function PreMarketTab({
 
       {valid && (
         <div className="panel-box">
-          <div className="panel-title">QQQ / NQ Price Ladder</div>
-          <div className="panel-desc">Every QQQ level around today's price, mapped to its NQ equivalent.</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <div>
+              <div className="panel-title" style={{ marginBottom: 2 }}>QQQ / NQ Price Ladder</div>
+              <div className="panel-desc" style={{ marginBottom: 0 }}>Every QQQ level around today's price, mapped to its NQ equivalent.</div>
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <button
+                className="btn small ghost"
+                onClick={() => {
+                  const win = window.open("", "_blank");
+                  const html = buildPreMarketPrepHtml({ qqq, mult, move, nqPrice: nqPrice!, nqLow: nqLow!, nqHigh: nqHigh!, qqqLow: qqqLow!, qqqHigh: qqqHigh!, openInterestNotes: form.openInterestNotes, oiLevels, ladderRows });
+                  if (!win) return;
+                  const blob = new Blob([html], { type: "text/html" });
+                  win.location.href = URL.createObjectURL(blob);
+                }}
+              >
+                View HTML
+              </button>
+              <button
+                className="btn small ghost"
+                onClick={() => {
+                  const html = buildPreMarketPrepHtml({ qqq, mult, move, nqPrice: nqPrice!, nqLow: nqLow!, nqHigh: nqHigh!, qqqLow: qqqLow!, qqqHigh: qqqHigh!, openInterestNotes: form.openInterestNotes, oiLevels, ladderRows });
+                  const blob = new Blob([html], { type: "text/html" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `nq-cockpit-premarket-prep-${new Date().toISOString().slice(0, 10)}.html`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download HTML
+              </button>
+            </div>
+          </div>
           <div className="grid2" style={{ marginBottom: 16 }}>
             <div className="field"><label>Range (± QQQ points)</label>
               <input type="number" step="1" value={ladderRange} onChange={(e) => setLadderRange(e.target.value)} />
@@ -784,16 +1116,28 @@ function PreMarketTab({
                 <tr><th>QQQ</th><th>NQ</th></tr>
               </thead>
               <tbody>
-                {ladderRows.map((row) => (
-                  <tr key={row.qqq} style={row.isAnchor ? { background: "rgba(245,166,35,0.12)" } : undefined}>
-                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
-                      {row.qqq.toFixed(2)}{row.isAnchor ? "  ← today" : ""}
-                    </td>
-                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
-                      {row.nq.toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
+                {ladderRows.map((row) => {
+                  const isWall = wallStrikes.has(row.qqq);
+                  const matchedLevel = !isWall && todayLevels.find((l) => Math.abs(l.strike - row.qqq) < 0.01);
+                  return (
+                    <tr
+                      key={row.qqq}
+                      style={
+                        row.isAnchor ? { background: "rgba(245,166,35,0.12)" } :
+                        isWall ? { background: "rgba(229,72,77,0.12)" } :
+                        matchedLevel ? { background: "rgba(229,72,77,0.05)" } : undefined
+                      }
+                    >
+                      <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
+                        {row.qqq.toFixed(2)}
+                        {row.isAnchor ? "  ← today" : isWall ? `  ← WALL (${wallOiByStrike.get(row.qqq)?.toLocaleString()} OI)` : matchedLevel ? `  ← OI logged (${matchedLevel.oi.toLocaleString()})` : ""}
+                      </td>
+                      <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
+                        {row.nq.toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -828,6 +1172,33 @@ function PreMarketTab({
       <div className="panel-box">
         <div className="panel-title">Open Interest Levels</div>
         <div className="panel-desc">Log notable strikes and their OI before the open — useful support/resistance reference for the day.</div>
+
+        <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14, marginBottom: 16, background: "var(--panel-2)" }}>
+          <div className="card-label" style={{ marginBottom: 6 }}>Upload tonight's chain (after 8pm ET, for tomorrow's expiry)</div>
+          <div className="panel-desc" style={{ marginBottom: 8 }}>Upload a screenshot of the option chain, or paste the copied text — every visible strike gets read, logged, and the top 3 by OI get flagged as walls below. Replaces today's levels rather than piling on top.</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button className={`btn small ${chainMode === "image" ? "primary" : "ghost"}`} onClick={() => setChainMode("image")}>Screenshot</button>
+            <button className={`btn small ${chainMode === "text" ? "primary" : "ghost"}`} onClick={() => setChainMode("text")}>Paste Text</button>
+          </div>
+          {chainMode === "image" ? (
+            <input
+              type="file" accept="image/*" disabled={chainBusy}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleChainFile(f); }}
+            />
+          ) : (
+            <>
+              <textarea
+                rows={5} style={{ width: "100%" }} placeholder="Paste the copied chain text here…"
+                value={chainText} onChange={(e) => setChainText(e.target.value)}
+              />
+              <button className="btn small" style={{ marginTop: 8 }} disabled={chainBusy || !chainText.trim()} onClick={() => runChainParse({ text: chainText })}>
+                {chainBusy ? "Reading…" : "Parse & Save"}
+              </button>
+            </>
+          )}
+          {chainBusy && chainMode === "image" && <div className="card-sub" style={{ marginTop: 8 }}>Reading the screenshot…</div>}
+        </div>
+
         <div className="grid3">
           <div className="field"><label>Strike</label>
             <input type="number" step="1" value={oiForm.strike} onChange={(e) => setOiForm({ ...oiForm, strike: e.target.value })} placeholder="e.g. 700" />
@@ -846,14 +1217,15 @@ function PreMarketTab({
         ) : (
           <div style={{ overflowX: "auto", marginTop: 16 }}>
             <table>
-              <thead><tr><th>Date</th><th>Strike</th><th>OI</th><th>Note</th><th></th></tr></thead>
+              <thead><tr><th>Date</th><th>Strike</th><th>OI</th><th>Note</th><th></th><th></th></tr></thead>
               <tbody>
                 {oiLevels.map((l) => (
-                  <tr key={l.id}>
+                  <tr key={l.id} style={wallStrikes.has(l.strike) ? { background: "rgba(229,72,77,0.1)" } : undefined}>
                     <td>{new Date(l.date).toLocaleDateString()}</td>
-                    <td>{l.strike}</td>
+                    <td style={wallStrikes.has(l.strike) ? { color: "var(--red)", fontWeight: 600 } : undefined}>{l.strike}</td>
                     <td>{l.oi.toLocaleString()}</td>
                     <td>{l.note || "—"}</td>
+                    <td>{wallStrikes.has(l.strike) && <span className="tag" style={{ background: "rgba(229,72,77,0.15)", color: "var(--red)" }}>WALL</span>}</td>
                     <td><button className="btn small ghost" onClick={() => onDeleteOi(l.id)}>Del</button></td>
                   </tr>
                 ))}
@@ -900,6 +1272,111 @@ function RangeBar({ label, low, mid, high }: { label: string; low: number; mid: 
 
 type Observation = { level: "info" | "warning" | "critical"; text: string };
 
+// A dedicated, always-visible visual for today's expected-move plan — separate
+// from the manual Intraday Check card below (which only shows its RangeBar
+// when you type a price in) and from Today's Chart (a time series you have to
+// read point-by-point). This one just answers "where is price right now,
+// relative to the plan" at a glance, using whatever the most recent check is
+// — auto-logged every minute during market hours, or your last manual one.
+function ExpectedMoveTracker({ checks, todayPrep }: { checks: IntradayCheckT[]; todayPrep: PreMarketPrep | null }) {
+  const todayStr = tradingDayKey(new Date());
+  const todayChecks = checks.filter((c) => tradingDayKey(new Date(c.date)) === todayStr);
+  const latest = todayChecks.length > 0 ? todayChecks[todayChecks.length - 1] : null;
+
+  if (!todayPrep) {
+    return (
+      <div className="panel-box">
+        <div className="panel-title">Expected Move</div>
+        <div className="empty-state"><div className="big">🎯</div>No Pre-Market prep logged today — log QQQ price, multiplier, and estimated move on the Pre-Market tab to enable this.</div>
+      </div>
+    );
+  }
+  if (!latest) {
+    return (
+      <div className="panel-box">
+        <div className="panel-title">Expected Move</div>
+        <div className="empty-state"><div className="big">🎯</div>No price checks yet today. This fills in automatically once the market opens (auto-logged every minute, 9:30am–4:00pm ET) or as soon as you log a manual Intraday check.</div>
+      </div>
+    );
+  }
+
+  const low = todayPrep.qqqPrice - todayPrep.estimatedMove;
+  const high = todayPrep.qqqPrice + todayPrep.estimatedMove;
+  const nqLow = low * todayPrep.multiplier;
+  const nqHigh = high * todayPrep.multiplier;
+  const qqq = latest.qqqPrice;
+  const moveFromAnchor = qqq - todayPrep.qqqPrice;
+  const pctUsed = todayPrep.estimatedMove > 0 ? (Math.abs(moveFromAnchor) / todayPrep.estimatedMove) * 100 : 0;
+  const outside = qqq < low || qqq > high;
+  const dir = moveFromAnchor >= 0 ? "up" : "down";
+  const ageMinutes = Math.round((Date.now() - new Date(latest.date).getTime()) / 60000);
+  // Position on the bar is clamped to 0-100% so an out-of-range price still
+  // renders (pinned to whichever edge it blew past) instead of drawing
+  // outside the bar entirely — the red coloring plus the alert text above is
+  // what actually communicates "outside," not the marker's raw position.
+  const clampedPct = Math.max(0, Math.min(100, ((qqq - low) / (high - low)) * 100));
+  const markerColor = outside ? "var(--red)" : pctUsed >= 70 ? "var(--amber)" : "var(--cyan)";
+
+  return (
+    <div className="panel-box">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div className="panel-title" style={{ margin: 0 }}>Expected Move</div>
+        <span className="card-sub" style={{ marginTop: 0 }}>Updated {ageMinutes <= 0 ? "just now" : `${ageMinutes}m ago`}</span>
+      </div>
+      <div className="panel-desc">Today's plan: pivot {todayPrep.qqqPrice.toFixed(2)} QQQ (NQ {todayPrep.nqPrice.toFixed(1)}) ± {todayPrep.estimatedMove} pts.</div>
+
+      {outside && (
+        <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
+          ⚠ OUTSIDE today's expected move — {Math.abs(moveFromAnchor).toFixed(2)} QQQ pts {dir} of plan ({pctUsed.toFixed(0)}% of estimated move, already exceeded). This is now outside your normal-day scenario.
+        </div>
+      )}
+      {!outside && pctUsed >= 70 && (
+        <div className="status-banner status-warn" style={{ marginBottom: 12 }}>
+          ⚠ Nearing the edge — {pctUsed.toFixed(0)}% of today's estimated move used ({dir}).
+        </div>
+      )}
+
+      <div style={{ position: "relative", height: 14, marginTop: 8 }}>
+        <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: "var(--amber)", opacity: 0.6 }} />
+        <div style={{ height: 14, background: "var(--panel-2)", borderRadius: 7, border: "1px solid var(--line)" }} />
+        <div
+          style={{
+            position: "absolute",
+            left: `calc(${clampedPct}% - 7px)`,
+            top: -6,
+            width: 14,
+            height: 26,
+            borderRadius: 3,
+            background: markerColor,
+            border: "2px solid var(--bg)",
+          }}
+          title={`QQQ ${qqq.toFixed(2)}`}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11, color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace" }}>
+        <span>LOW {low.toFixed(2)} ({nqLow.toFixed(1)})</span>
+        <span style={{ color: "var(--amber)" }}>PIVOT {todayPrep.qqqPrice.toFixed(2)} ({todayPrep.nqPrice.toFixed(1)})</span>
+        <span>HIGH {high.toFixed(2)} ({nqHigh.toFixed(1)})</span>
+      </div>
+
+      <div style={{ display: "flex", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="card-sub">Current QQQ</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{qqq.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="card-sub">Current NQ (calc)</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{latest.nqPrice.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="card-sub">Move used</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20, color: markerColor }}>{pctUsed.toFixed(0)}% {dir}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function buildObservations(
   currentQqq: number,
   prep: PreMarketPrep | null,
@@ -931,7 +1408,7 @@ function buildObservations(
     }
   }
 
-  const todayLevels = oiLevels.filter((l) => new Date(l.date).toDateString() === new Date().toDateString());
+  const todayLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
   todayLevels.forEach((level) => {
     const distance = Math.abs(currentQqq - level.strike);
     if (distance <= 2) {
@@ -1016,50 +1493,121 @@ function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayP
         <line x1={pad} y1={data.nqAnchorY} x2={w - pad} y2={data.nqAnchorY} stroke="var(--amber)" strokeDasharray="2 3" />
       )}
       <polyline points={data.coords} fill="none" stroke="var(--cyan)" strokeWidth="2" />
-      {data.points.map((p, i) => (
-        <circle key={i} cx={p.x} cy={p.y} r="3" fill="var(--cyan)" />
-      ))}
     </svg>
   );
 }
 
-function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
-  const w = 900, h = 220, pad = 30;
+function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null, oiLevels: OILevel[] = []) {
+  const w = 900, h = 160, pad = 26;
   const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
   const svg = `
-    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:220px;background:#121B2E;border-radius:8px;" xmlns="http://www.w3.org/2000/svg">
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:150px;background:#121B2E;border-radius:8px;" xmlns="http://www.w3.org/2000/svg">
       ${data.nqHighY !== null ? `<line x1="${pad}" y1="${data.nqHighY}" x2="${w - pad}" y2="${data.nqHighY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqHighY - 4}" fill="#E5484D" font-size="10" text-anchor="end">Est. High ${data.nqHigh?.toFixed(1)}</text>` : ""}
       ${data.nqLowY !== null ? `<line x1="${pad}" y1="${data.nqLowY}" x2="${w - pad}" y2="${data.nqLowY}" stroke="#E5484D" stroke-dasharray="4 4"/><text x="${w - pad}" y="${data.nqLowY + 12}" fill="#E5484D" font-size="10" text-anchor="end">Est. Low ${data.nqLow?.toFixed(1)}</text>` : ""}
       ${data.nqAnchorY !== null ? `<line x1="${pad}" y1="${data.nqAnchorY}" x2="${w - pad}" y2="${data.nqAnchorY}" stroke="#F5A623" stroke-dasharray="2 3"/>` : ""}
       <polyline points="${data.coords}" fill="none" stroke="#3FD0C9" stroke-width="2"/>
-      ${data.points.map((p) => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#3FD0C9"/>`).join("")}
     </svg>`;
 
-  const rows = checks.map((c) => `
-    <tr><td>${new Date(c.date).toLocaleTimeString()}</td><td>${c.qqqPrice.toFixed(2)}</td><td>${c.nqPrice.toFixed(2)}</td></tr>`).join("");
+  // Fixed ±20 QQQ points around the anchor — independent of whatever the
+  // day's own estimated move happens to be set to, per request. Split
+  // into two columns (top half / bottom half) rather than one long list,
+  // so the full 41-row ladder still fits on one printed page now that
+  // Logged Checks (which used to fill the second column) is gone.
+  let ladderHtml = "";
+  if (todayPrep) {
+    const anchor = todayPrep.qqqPrice;
+    const mult = todayPrep.multiplier;
+    const move = todayPrep.estimatedMove;
+    const RANGE = 20;
+    const start = Math.floor(anchor - RANGE);
+    const end = Math.ceil(anchor + RANGE);
+    const allLevels: number[] = [];
+    for (let level = end; level >= start; level -= 1) allLevels.push(level);
+    const mid = Math.ceil(allLevels.length / 2);
+    const leftLevels = allLevels.slice(0, mid);
+    const rightLevels = allLevels.slice(mid);
+
+    // The estimated-move boundary itself is very likely a fractional QQQ
+    // value, but the ladder only has whole-point rows — so highlight
+    // whichever whole-point row sits closest to anchor+move and
+    // anchor-move, same red used for Est. High/Low on the chart above,
+    // so the two visuals read as the same thing.
+    const highBoundLevel = Math.round(anchor + move);
+    const lowBoundLevel = Math.round(anchor - move);
+
+    // Top 3 today's OI levels by OI — same "wall" computation as
+    // Pre-Market Prep, so a strike flagged there shows up here too.
+    const todayOiLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
+    const topWalls = [...todayOiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3);
+    const wallStrikes = new Set(topWalls.map((l) => Math.round(l.strike)));
+    const wallOiByStrike = new Map(topWalls.map((l) => [Math.round(l.strike), l.oi]));
+
+    const rowsFor = (levels: number[]) =>
+      levels
+        .map((level) => {
+          const isAnchor = Math.abs(level - anchor) < 0.5;
+          const isWall = wallStrikes.has(level);
+          const isBound = level === highBoundLevel || level === lowBoundLevel;
+          const cls = isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : isBound ? ' class="bound-row"' : "";
+          const marker = isAnchor ? " \u2190 anchor" : isWall ? ` \u2190 WALL (${wallOiByStrike.get(level)?.toLocaleString()} OI)` : isBound ? " \u2190 \u00b1move" : "";
+          return `<tr${cls}><td>${level.toFixed(2)}${marker}</td><td>${(level * mult).toFixed(2)}</td></tr>`;
+        })
+        .join("");
+
+    ladderHtml = `
+      <div class="col">
+        <table><thead><tr><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rowsFor(leftLevels)}</tbody></table>
+      </div>
+      <div class="col">
+        <table><thead><tr><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rowsFor(rightLevels)}</tbody></table>
+      </div>`;
+  }
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>NQ Cockpit — Intraday Chart</title>
 <style>
-body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:32px;}
-h1{color:#F5A623;} table{border-collapse:collapse;width:100%;margin-top:16px;}
-th,td{padding:8px 10px;border-bottom:1px solid #263654;text-align:left;font-size:13px;}
-th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
+  @page { size: letter; margin: 0.5in; }
+  body{font-family:'Courier New',monospace;background:#0B1220;color:#E8EDF5;padding:20px;font-size:12px;}
+  h1{color:#F5A623;font-size:18px;margin:0 0 4px;}
+  h2{color:#3FD0C9;font-size:13px;margin:0 0 6px;}
+  p{margin:2px 0;}
+  table{border-collapse:collapse;width:100%;margin-bottom:8px;}
+  th,td{padding:4px 8px;border-bottom:1px solid #263654;text-align:left;font-size:11px;}
+  th{color:#7F8CA6;text-transform:uppercase;font-size:9px;}
+  .cols{display:flex;gap:24px;margin-top:12px;}
+  .col{flex:1;min-width:0;}
+  .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  .bound-row td{background:rgba(229,72,77,0.15);color:#E5484D;font-weight:bold;}
+  .wall-row td{background:rgba(167,139,250,0.18);color:#A78BFA;font-weight:bold;}
+  .note{color:#7F8CA6;font-size:10px;margin-top:12px;}
+  @media print {
+    body{background:#fff;color:#000;padding:0;font-size:10.5px;}
+    h1,h2{color:#000;}
+    th{color:#555;border-bottom-color:#ccc;}
+    td{border-bottom-color:#eee;}
+    .note{color:#666;}
+    .anchor-row td{background:#f0f0f0 !important;color:#000 !important;}
+    .bound-row td{background:#fbe4e4 !important;color:#a12020 !important;}
+    .wall-row td{background:#ece5fc !important;color:#5b3fa0 !important;}
+    svg{background:#f3f3f3 !important;}
+  }
 </style></head>
 <body>
 <h1>NQ COCKPIT — Intraday Chart</h1>
-<p>${new Date().toLocaleDateString()} · ${checks.length} check(s) logged</p>
-${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} · Estimated move: ±${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
+<p>${new Date().toLocaleDateString()} \u00b7 ${checks.length} check(s) logged</p>
+${todayPrep ? `<p>Anchor: ${todayPrep.nqPrice.toFixed(2)} \u00b7 Estimated move: \u00b1${todayPrep.estimatedMove} QQQ pts</p>` : "<p>No Pre-Market prep logged today.</p>"}
 ${svg}
-<table><thead><tr><th>Time</th><th>QQQ</th><th>NQ</th></tr></thead><tbody>${rows}</tbody></table>
-<p style="color:#7F8CA6;font-size:11px;margin-top:20px;">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
+<div class="cols">
+${ladderHtml}
+</div>
+<p class="note">Auto-logged from a live QQQ quote every minute during market hours, plus any manual checks you added.</p>
 </body></html>`;
 
   return html;
 }
 
-function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
-  downloadHtmlReport(buildIntradayHtmlReport(checks, todayPrep), `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
+function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null, oiLevels: OILevel[] = []) {
+  downloadHtmlReport(buildIntradayHtmlReport(checks, todayPrep, oiLevels), `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
 }
 
 const EMO_TAGS = ["Calm", "Confident", "Anxious", "FOMO", "Doubt", "Overconfident", "Tilted / Revenge", "Fear of losing gains", "Impatient", "Bored"];
@@ -1131,22 +1679,38 @@ function EmotionalJournalTab({
 function IntradayTab({
   input,
   setInput,
+  nqInput,
+  setNqInput,
   onCheck,
   checks,
   todayPrep,
   oiLevels,
+  snapshots,
+  addSnapshot,
+  deleteSnapshot,
+  updateSnapshotNote,
 }: {
   input: string;
   setInput: (v: string) => void;
+  nqInput: string;
+  setNqInput: (v: string) => void;
   onCheck: () => void;
   checks: IntradayCheckT[];
   todayPrep: PreMarketPrep | null;
   oiLevels: OILevel[];
+  snapshots: ChartSnapshot[];
+  addSnapshot: (file: File, note: string) => Promise<void>;
+  deleteSnapshot: (id: number) => Promise<void>;
+  updateSnapshotNote: (id: number, note: string) => Promise<void>;
 }) {
-  const qqq = parseFloat(input);
-  const validInput = !isNaN(qqq);
-  const valid = validInput && !!todayPrep;
   const multiplier = todayPrep?.multiplier ?? null;
+  const qqqTyped = parseFloat(input);
+  const nqTyped = parseFloat(nqInput);
+  // Whichever field has a value wins for the preview below — same
+  // either/or logic as addIntradayCheck itself uses when actually saving.
+  const qqq = !isNaN(qqqTyped) ? qqqTyped : (!isNaN(nqTyped) && multiplier ? nqTyped / multiplier : NaN);
+  const validInput = !isNaN(qqqTyped) || !isNaN(nqTyped);
+  const valid = validInput && !!todayPrep && !isNaN(qqq);
   const nqPrice = valid ? qqq * multiplier! : null;
   const observations = valid ? buildObservations(qqq, todayPrep, oiLevels, checks) : [];
 
@@ -1155,16 +1719,20 @@ function IntradayTab({
 
   return (
     <>
+      <ExpectedMoveTracker checks={checks} todayPrep={todayPrep} />
       <div className="panel-box">
         <div className="panel-title">Intraday Check</div>
-        <div className="panel-desc">Punch in QQQ's current price any time during the day — NQ and today's observations update instantly.</div>
+        <div className="panel-desc">Punch in QQQ's current price any time during the day — or, overnight on Globex when QQQ isn't trading, enter the NQ price you're watching directly. NQ and today's observations update instantly either way.</div>
         <div className="grid2">
           <div className="field"><label>Current QQQ Price</label>
-            <input type="number" step="0.01" value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. 698.50" />
+            <input type="number" step="0.01" value={input} onChange={(e) => { setInput(e.target.value); if (e.target.value) setNqInput(""); }} placeholder="e.g. 698.50" />
           </div>
-          <div style={{ display: "flex", alignItems: "flex-end" }}>
-            <button className="btn primary" onClick={onCheck} disabled={!validInput} style={{ width: "100%" }}>Log Check</button>
+          <div className="field"><label>— or — Current NQ Price directly</label>
+            <input type="number" step="0.25" value={nqInput} onChange={(e) => { setNqInput(e.target.value); if (e.target.value) setInput(""); }} placeholder="e.g. 28500 (overnight Globex)" />
           </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <button className="btn primary" onClick={onCheck} disabled={!validInput} style={{ width: "100%" }}>Log Check</button>
         </div>
 
         {validInput && !todayPrep && (
@@ -1200,12 +1768,14 @@ function IntradayTab({
       <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div className="panel-title" style={{ margin: 0 }}>Today's Chart</div>
-          <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep))} disabled={checks.length === 0}>View HTML</button>
-          <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
+          <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep, oiLevels))} disabled={checks.length === 0}>View HTML</button>
+          <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep, oiLevels)} disabled={checks.length === 0}>Download HTML</button>
         </div>
-        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am\u20134:00pm ET) \u2014 you can still add a manual check any time too.</div>
+        <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am–4:00pm ET) — you can still add a manual check any time too.</div>
         <IntradayChart checks={checks} todayPrep={todayPrep} />
       </div>
+
+      <ChartSnapshotPanel snapshots={snapshots} addSnapshot={addSnapshot} deleteSnapshot={deleteSnapshot} updateSnapshotNote={updateSnapshotNote} />
 
       <div className="panel-box">
         <div className="panel-title">Today's Checks</div>
@@ -1232,6 +1802,104 @@ function IntradayTab({
   );
 }
 
+function ChartSnapshotPanel({
+  snapshots,
+  addSnapshot,
+  deleteSnapshot,
+  updateSnapshotNote,
+}: {
+  snapshots: ChartSnapshot[];
+  addSnapshot: (file: File, note: string) => Promise<void>;
+  deleteSnapshot: (id: number) => Promise<void>;
+  updateSnapshotNote: (id: number, note: string) => Promise<void>;
+}) {
+  const [note, setNote] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingNote, setEditingNote] = useState("");
+  const todayStr = tradingDayKey(new Date());
+  const todaysSnapshots = snapshots.filter((s) => tradingDayKey(new Date(s.date)) === todayStr);
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await addSnapshot(file, note);
+      setNote("");
+    } catch (err: any) {
+      alert("Upload failed: " + (err.message || String(err)));
+    }
+    setUploading(false);
+    e.target.value = "";
+  }
+
+  return (
+    <div className="panel-box">
+      <div className="panel-title">Chart Snapshots</div>
+      <div className="panel-desc">Upload a chart screenshot (e.g. from Thinkorswim) any time during the day as a reminder of a good or bad trade — shown in your daily reports. Note field is optional here and can also be added/edited on any snapshot afterward, in case you picked the image before typing a note.</div>
+      <div className="grid2">
+        <div className="field">
+          <label>Note (optional)</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Good — respected the trend, didn't chase" />
+        </div>
+        <div className="field">
+          <label>Image</label>
+          <input type="file" accept="image/*" onChange={handleFile} disabled={uploading} />
+        </div>
+      </div>
+      {uploading && <div className="card-sub">Uploading…</div>}
+      {todaysSnapshots.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
+          {todaysSnapshots.map((s) => (
+            <div key={s.id} style={{ width: 220 }}>
+              <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+              <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+              {editingId === s.id ? (
+                <div style={{ marginTop: 4 }}>
+                  <input
+                    value={editingNote}
+                    onChange={(e) => setEditingNote(e.target.value)}
+                    placeholder="Add a note…"
+                    autoFocus
+                    style={{ marginBottom: 6 }}
+                  />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      className="btn small primary"
+                      onClick={async () => {
+                        await updateSnapshotNote(s.id, editingNote);
+                        setEditingId(null);
+                      }}
+                    >
+                      Save
+                    </button>
+                    <button className="btn small ghost" onClick={() => setEditingId(null)}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 6 }}>
+                  <div className="card-sub" style={{ flex: 1 }}>{s.note || <em>No note</em>}</div>
+                  <button
+                    className="btn small ghost"
+                    onClick={() => {
+                      setEditingId(s.id);
+                      setEditingNote(s.note || "");
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
+              <button className="btn small ghost" style={{ marginTop: 6 }} onClick={() => deleteSnapshot(s.id)}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type StopRule = {
   id: number;
   createdAt: string;
@@ -1242,7 +1910,12 @@ type StopRule = {
   entryPrice: number;
   qty: number;
   triggerOffset: number;
-  newStopOffset: number;
+  mode: string;
+  newStopOffset: number | null;
+  trailAmount: number | null;
+  checkFrequency: number | null;
+  lastRatchetPrice: number | null;
+  ratchetCount: number;
   status: string;
   triggeredAt: string | null;
   newStopPrice: number | null;
@@ -1263,10 +1936,11 @@ type OrderLog = {
   targetPrice: number | null;
   status: string;
   blockedReason: string | null;
+  addReason: string | null;
   tradovateOrderId: string | null;
 };
 
-function TradeTicketTab({ settings }: { settings: Settings }) {
+function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trade[] }) {
   function computeWindowStatus() {
     const raw = getTradingWindowStatus(settings);
     if (settings.tradovateEnv !== "live") {
@@ -1278,7 +1952,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
 
   const [connStatus, setConnStatus] = useState<{ connected: boolean; accounts: any[] | null; error: any } | null>(null);
   const [logs, setLogs] = useState<OrderLog[]>([]);
-  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Market", price: "", stopLoss: "", target: "" });
+  const [form, setForm] = useState({ accountId: "", root: "NQ", action: "Buy", qty: "1", orderType: "Limit", price: "", stopLoss: "", target: "" });
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ type: "blocked" | "error" | "success"; message: string } | null>(null);
   const [resolvedSymbol, setResolvedSymbol] = useState<{ symbol: string | null; expiration: string | null; error?: string } | null>(null);
@@ -1300,22 +1974,97 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     ? `${lastKnownPriceAgeMinutes} min ago`
     : `${Math.floor(lastKnownPriceAgeMinutes / 60)}h ${lastKnownPriceAgeMinutes % 60}m ago`;
   const [lockout, setLockout] = useState<{ until: string; reason: string } | null>(null);
+
+  // Order Type defaults to Limit now, so — unlike before, when this only
+  // ever ran off an explicit "switch to Limit" click — the price (and the
+  // default stop/target derived from it) need a first prefill as soon as a
+  // fresh last-known price actually arrives, since it loads in async after
+  // the initial render. Only fires while the field is still untouched
+  // (empty), so it never overwrites a price you've already started typing.
+  useEffect(() => {
+    if (form.orderType === "Limit" && !form.price && lastKnownPriceIsFresh && lastKnownPrice !== null) {
+      const rounded = String(roundToTick(lastKnownPrice));
+      setForm((f) => (f.price ? f : { ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastKnownPrice, lastKnownPriceIsFresh]);
+
   const [currentPositions, setCurrentPositions] = useState<{ symbol: string; netPos: number; netPrice: number; pnl: number | null; pnlSource: "position" | "account" | "estimated" | null; loggedPrice: number | null; loggedPriceAgeMinutes: number | null; openSinceMinutes: number | null }[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
+  const [stopInputs, setStopInputs] = useState<Record<string, string>>({});
+  const [stopModifyBusy, setStopModifyBusy] = useState<string | null>(null);
+
+  // Tightening a stop (reducing risk) goes straight through; loosening one
+  // requires a typed reason first, mirroring the add-on reason prompt —
+  // the closest real equivalent to "locking a stop" this app can enforce,
+  // since it can only govern stops modified through its own UI, not one
+  // changed directly in Tradovate.
+  async function submitStopModify(symbol: string) {
+    const newStop = parseFloat(stopInputs[symbol]);
+    if (isNaN(newStop)) {
+      alert("Enter a valid stop price first.");
+      return;
+    }
+    setStopModifyBusy(symbol);
+    try {
+      const doRequest = async (reason?: string) =>
+        fetch("/api/tradovate/modify-stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ env: settings.tradovateEnv, accountId: form.accountId, symbol, newStopPrice: newStop, reason }),
+        });
+      let res = await doRequest();
+      let body = await res.json();
+      if (res.status === 403 && body.blocked) {
+        const reason = window.prompt(`${body.reason}\n\nType a reason to proceed anyway, or Cancel to leave the stop as-is.`);
+        if (!reason || !reason.trim()) return;
+        res = await doRequest(reason);
+        body = await res.json();
+      }
+      if (body.ok) {
+        alert(`Stop updated: ${body.previousStop} \u2192 ${body.newStop}`);
+        setStopInputs((s) => ({ ...s, [symbol]: "" }));
+        refreshPositions();
+      } else if (body.warning) {
+        alert(`\u26a0 ${body.warning}`);
+      } else if (body.error) {
+        alert(body.error);
+      }
+    } finally {
+      setStopModifyBusy(null);
+    }
+  }
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
-  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+  const [stopRuleMode, setStopRuleMode] = useState<"oneshot" | "trail">("oneshot");
+  // Defaults lifted directly from your own Tradovate ATM template
+  // (Auto Trail: Stop Loss 6.50 / Profit Trigger 7.75 / Frequency 8.75) —
+  // still ordinary editable fields, this just saves retyping the same
+  // three numbers on every single trade.
+  const AUTO_TRAIL_DEFAULTS = { triggerOffset: "7.75", trailAmount: "6.50", checkFrequency: "8.75" };
+  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", newStopOffset: "", ...AUTO_TRAIL_DEFAULTS });
 
   function refreshStopRules() {
     fetch("/api/tradovate/stop-rules").then((r) => r.json()).then(setStopRules);
   }
 
   async function addStopRule() {
-    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset || !stopRuleForm.newStopOffset) {
-      alert("Fill in account, entry price, trigger offset, and new stop offset (contract must be resolved too).");
+    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset) {
+      alert("Fill in account, entry price, and trigger (contract must be resolved too).");
       return;
     }
-    if (!confirm(`This will automatically move your stop once price moves ${stopRuleForm.triggerOffset} points in your favor — with NO manual confirmation. Tradovate's own API has documented cases of silently failing to actually move the order. Continue?`)) {
+    if (stopRuleMode === "oneshot" && !stopRuleForm.newStopOffset) {
+      alert("Fill in the new stop offset for a one-shot rule.");
+      return;
+    }
+    if (stopRuleMode === "trail" && (!stopRuleForm.trailAmount || !stopRuleForm.checkFrequency)) {
+      alert("Fill in the trail amount and check frequency for an Auto Trail rule.");
+      return;
+    }
+    const confirmMsg = stopRuleMode === "oneshot"
+      ? `This will automatically move your stop once price moves ${stopRuleForm.triggerOffset} points in your favor — with NO manual confirmation. Tradovate's own API has documented cases of silently failing to actually move the order. Continue?`
+      : `This will continuously trail your stop ${stopRuleForm.trailAmount} points behind price once you're ${stopRuleForm.triggerOffset} points in profit, ratcheting every ${stopRuleForm.checkFrequency} points of favorable movement — with NO manual confirmation, checked roughly every minute. It never loosens, only tightens. Continue?`;
+    if (!confirm(confirmMsg)) {
       return;
     }
     await fetch("/api/tradovate/stop-rules", {
@@ -1328,10 +2077,13 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         entryPrice: stopRuleForm.entryPrice,
         qty: form.qty,
         triggerOffset: stopRuleForm.triggerOffset,
-        newStopOffset: stopRuleForm.newStopOffset,
+        mode: stopRuleMode,
+        newStopOffset: stopRuleMode === "oneshot" ? stopRuleForm.newStopOffset : undefined,
+        trailAmount: stopRuleMode === "trail" ? stopRuleForm.trailAmount : undefined,
+        checkFrequency: stopRuleMode === "trail" ? stopRuleForm.checkFrequency : undefined,
       }),
     });
-    setStopRuleForm({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+    setStopRuleForm((f) => ({ ...f, entryPrice: "", newStopOffset: "" }));
     refreshStopRules();
   }
 
@@ -1386,7 +2138,27 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     setWindowStatus(computeWindowStatus());
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
       .then((r) => r.json())
-      .then((d) => setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error }))
+      .then((d) => {
+        setConnStatus({ connected: d.connected, accounts: d.accounts, error: d.error });
+        // Prefers the account you've pinned in Settings for this
+        // environment (needed once more than one account exists — auto-
+        // selecting "the only one" doesn't work anymore). Falls back to
+        // auto-selecting if there's genuinely just one account and nothing
+        // configured, otherwise leaves it for manual selection.
+        const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
+        // Tradovate accounts have both an internal `id` and a separate
+        // human-readable `name` (the account number, e.g. "1003033") — you
+        // see `name` in the dropdown, so match against either rather than
+        // assuming what got typed into Settings is specifically the id.
+        const preferredMatch = preferredId
+          ? d.accounts?.find((a: any) => String(a.id) === String(preferredId) || String(a.name) === String(preferredId))
+          : null;
+        if (preferredMatch) {
+          setForm((f) => ({ ...f, accountId: String(preferredMatch.id) }));
+        } else if (d.accounts?.length === 1) {
+          setForm((f) => ({ ...f, accountId: String(d.accounts[0].id) }));
+        }
+      })
       .catch((e) => setConnStatus({ connected: false, accounts: null, error: String(e) }));
     fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
 
@@ -1398,11 +2170,11 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
       fetch("/api/premarket").then((r) => r.json()),
     ]).then(([checks, prep]) => {
       const latestCheck = checks[checks.length - 1];
-      const todayPrep = prep.find((p: PreMarketPrep) => new Date(p.date).toDateString() === new Date().toDateString());
+      const todayPrep = prep.find((p: PreMarketPrep) => tradingDayKey(new Date(p.date)) === tradingDayKey(new Date()));
       setLastKnownPrice(latestCheck?.nqPrice ?? todayPrep?.nqPrice ?? null);
       setLastKnownPriceAt(latestCheck?.date ?? todayPrep?.date ?? null);
     });
-  }, [settings.tradovateEnv]);
+  }, [settings.tradovateEnv, settings.liveAccountId, settings.demoAccountId]);
 
   useEffect(() => {
     setResolvedSymbol(null);
@@ -1416,7 +2188,10 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
   }, [form.root, settings.tradovateEnv]);
 
   function useLimitOrder() {
-    setForm((f) => ({ ...f, orderType: "Limit", price: lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price }));
+    setForm((f) => {
+      const price = lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price;
+      return { ...f, orderType: "Limit", price, ...computeStopTarget(price, f.action) };
+    });
   }
 
   async function submitOrder() {
@@ -1427,6 +2202,58 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
     if ((form.stopLoss && !form.target) || (!form.stopLoss && form.target)) {
       alert("Stop Loss and Target must both be filled in together, or both left blank.");
       return;
+    }
+    // FAT-FINGER CHECK — catches a typo'd extra digit (or a dropped one)
+    // before it goes anywhere near Tradovate. This isn't a risk-management
+    // guard like the ones below (a limit resting well away from market can
+    // be entirely intentional) — it's specifically a "does this number look
+    // like what you meant to type" sanity check, so it's a client-side
+    // confirm rather than a hard server-side block. Uses whatever last
+    // known price we have, even a stale one — a typo this size (10x, an
+    // extra zero, etc.) shows up against an hours-old reference just as
+    // clearly as a fresh one.
+    if (form.orderType === "Limit" && form.price && lastKnownPrice !== null) {
+      const enteredPrice = parseFloat(form.price);
+      if (Number.isFinite(enteredPrice) && enteredPrice > 0) {
+        const pctOff = Math.abs(enteredPrice - lastKnownPrice) / lastKnownPrice;
+        if (pctOff > 0.03) {
+          const proceed = window.confirm(
+            `\u26a0 Limit price ${enteredPrice} is ${(pctOff * 100).toFixed(0)}% away from the last known price (${roundToTick(lastKnownPrice).toFixed(2)}).\n\n` +
+            `This often means an extra or missing digit got typed in by mistake.\n\n` +
+            `Click OK only if ${enteredPrice} is really the price you meant to enter.`
+          );
+          if (!proceed) return;
+        }
+      }
+    }
+    // ADD-ON REASON PROMPT — if this order would add to an already-open
+    // position in the same symbol and direction, require a one-line reason
+    // before it goes through. This exists specifically because synced
+    // Tradovate fills otherwise carry zero self-reported context (unlike
+    // manually-logged Journal entries with their checklist/emotion fields)
+    // — after the fact there's no way to know *why* an add-on cluster
+    // happened, only that it did. Uses currentPositions, which can be up
+    // to ~30s stale (refreshed on an interval, not on every keystroke) —
+    // acceptable here since this is about capturing intent at the moment
+    // of the decision, not a risk gate; the actual position-guard check
+    // is still the authoritative, fresh, server-side one, unaffected by
+    // whatever gets typed into this prompt.
+    let addReason: string | undefined;
+    const existingPosition = currentPositions.find((p) => p.symbol === resolvedSymbol.symbol && p.netPos !== 0);
+    if (existingPosition) {
+      const existingDirection = existingPosition.netPos > 0 ? "long" : "short";
+      const newDirection = form.action === "Buy" ? "long" : "short";
+      if (newDirection === existingDirection) {
+        const reason = window.prompt(
+          `You already have an open ${existingDirection} position in ${resolvedSymbol.symbol} (${Math.abs(existingPosition.netPos)} contract(s) @ ${existingPosition.netPrice}).\n\n` +
+          `This order would add to it. Why? (one line, required)`
+        );
+        if (!reason || !reason.trim()) {
+          alert("A reason is required to add to an existing open position. Order not submitted.");
+          return;
+        }
+        addReason = reason.trim();
+      }
     }
     setSubmitting(true);
     setResult(null);
@@ -1444,6 +2271,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           price: form.orderType === "Limit" ? String(roundToTick(parseFloat(form.price))) : undefined,
           stopLoss: form.stopLoss ? String(roundToTick(parseFloat(form.stopLoss))) : undefined,
           target: form.target ? String(roundToTick(parseFloat(form.target))) : undefined,
+          addReason,
         }),
       });
       const data = await res.json();
@@ -1487,6 +2315,25 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
           {connStatus === null ? "Checking Tradovate connection…" : connStatus.connected ? `✓ Connected to Tradovate (${settings.tradovateEnv})` : `⚠ Not connected: ${JSON.stringify(connStatus.error)}`}
         </div>
 
+        {(() => {
+          // Every automated report has flagged the same gap repeatedly:
+          // synced trades almost never go through the Pre-Trade checklist,
+          // so there's no self-rated data to learn from beyond raw P&L.
+          // This won't force it — that's not realistic for fast synced
+          // fills — but a visible nudge before more trades stack up today
+          // is cheap and honest about what's missing.
+          const todayKey = tradingDayKey(new Date());
+          const todaysTrades = trades.filter((t) => t.source === settings.tradovateEnv && tradingDayKey(new Date(t.date)) === todayKey);
+          if (todaysTrades.length < 3) return null; // too early in the day for this to mean anything yet
+          const ratedCount = todaysTrades.filter((t) => t.disciplined !== null).length;
+          if (ratedCount > 0) return null;
+          return (
+            <div className="status-banner status-warn" style={{ marginTop: 8 }}>
+              📋 {todaysTrades.length} trades today, 0 through the Pre-Trade checklist — every report keeps flagging this same gap. Even a quick pass on the next entry gives future-you something more than raw P&amp;L to learn from.
+            </div>
+          );
+        })()}
+
         <div className="grid3" style={{ marginTop: 16 }}>
           <div className="field"><label>Account</label>
             <select value={form.accountId} onChange={(e) => setForm({ ...form, accountId: e.target.value })}>
@@ -1503,7 +2350,17 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
             </select>
           </div>
           <div className="field"><label>Side</label>
-            <select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
+            <select
+              value={form.action}
+              onChange={(e) => {
+                const newAction = e.target.value;
+                setForm((f) => ({
+                  ...f,
+                  action: newAction,
+                  ...(f.orderType === "Limit" && f.price ? computeStopTarget(f.price, newAction) : {}),
+                }));
+              }}
+            >
               <option value="Buy">Buy</option>
               <option value="Sell">Sell</option>
             </select>
@@ -1527,11 +2384,15 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
               value={form.orderType}
               onChange={(e) => {
                 const newType = e.target.value;
-                setForm((f) => ({
-                  ...f,
-                  orderType: newType,
-                  price: newType === "Limit" && !f.price && lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price,
-                }));
+                setForm((f) => {
+                  const price = newType === "Limit" && !f.price && lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price;
+                  return {
+                    ...f,
+                    orderType: newType,
+                    price,
+                    ...(newType === "Limit" && price && !f.stopLoss && !f.target ? computeStopTarget(price, f.action) : {}),
+                  };
+                });
               }}
             >
               <option value="Market">Market</option>
@@ -1545,7 +2406,10 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                 onChange={(e) => setForm({ ...form, price: e.target.value })}
                 onBlur={(e) => {
                   const v = parseFloat(e.target.value);
-                  if (!isNaN(v)) setForm((f) => ({ ...f, price: String(roundToTick(v)) }));
+                  if (!isNaN(v)) {
+                    const rounded = String(roundToTick(v));
+                    setForm((f) => ({ ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+                  }
                 }}
               />
               <div className="card-sub" style={{ marginTop: 4 }}>
@@ -1617,40 +2481,64 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
           <div className="card-label" style={{ marginBottom: 8 }}>AUTOMATIC STOP MANAGEMENT</div>
           <div className="panel-desc" style={{ marginTop: 0 }}>
-            Once price moves a set number of points in your favor, this automatically moves your stop to lock in profit —
-            no manual click, no confirmation.
+            <b>Fixed Move</b> moves your stop once, at a set trigger. <b>Auto Trail</b> continuously ratchets your stop to
+            stay a fixed distance behind price once you're in profit — same idea as Tradovate's own ATM Auto Trail template.
           </div>
           <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
             ⚠ Tradovate's own API has documented, unresolved cases of reporting a successful modification when the stop
             did not actually move. This app verifies afterward and will flag it loudly if that happens — but the
-            modification itself runs with no human confirmation. Checked on a schedule (however often your cron job
-            pings), not instantly.
+            modification itself runs with no human confirmation. Checked automatically roughly every 60 seconds.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button className={`btn small ${stopRuleMode === "oneshot" ? "primary" : "ghost"}`} onClick={() => setStopRuleMode("oneshot")}>Fixed Move</button>
+            <button className={`btn small ${stopRuleMode === "trail" ? "primary" : "ghost"}`} onClick={() => setStopRuleMode("trail")}>Auto Trail</button>
           </div>
           <div className="grid3">
             <div className="field"><label>Entry Price</label>
               <input type="number" step="0.25" value={stopRuleForm.entryPrice} onChange={(e) => setStopRuleForm({ ...stopRuleForm, entryPrice: e.target.value })} placeholder="e.g. 28777" />
             </div>
-            <div className="field"><label>Trigger (pts in your favor)</label>
+            <div className="field"><label>{stopRuleMode === "oneshot" ? "Trigger (pts in your favor)" : "Profit Trigger (pts, activates trailing)"}</label>
               <input type="number" step="0.25" value={stopRuleForm.triggerOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, triggerOffset: e.target.value })} placeholder="e.g. 11" />
             </div>
-            <div className="field"><label>New Stop (pts from entry)</label>
-              <input type="number" step="0.25" value={stopRuleForm.newStopOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, newStopOffset: e.target.value })} placeholder="e.g. 4" />
-            </div>
+            {stopRuleMode === "oneshot" ? (
+              <div className="field"><label>New Stop (pts from entry)</label>
+                <input type="number" step="0.25" value={stopRuleForm.newStopOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, newStopOffset: e.target.value })} placeholder="e.g. 4" />
+              </div>
+            ) : (
+              <div className="field"><label>Trail Amount (pts behind price)</label>
+                <input type="number" step="0.25" value={stopRuleForm.trailAmount} onChange={(e) => setStopRuleForm({ ...stopRuleForm, trailAmount: e.target.value })} placeholder="e.g. 6.5" />
+              </div>
+            )}
           </div>
-          <button className="btn small ghost" style={{ borderColor: "var(--red)", color: "var(--red)" }} onClick={addStopRule}>Create Auto-Stop Rule</button>
+          {stopRuleMode === "trail" && (
+            <div className="grid3">
+              <div className="field"><label>Frequency (pts between ratchets)</label>
+                <input type="number" step="0.25" value={stopRuleForm.checkFrequency} onChange={(e) => setStopRuleForm({ ...stopRuleForm, checkFrequency: e.target.value })} placeholder="e.g. 8.75" />
+              </div>
+            </div>
+          )}
+          <button className="btn small ghost" style={{ borderColor: "var(--red)", color: "var(--red)" }} onClick={addStopRule}>
+            Create {stopRuleMode === "oneshot" ? "Auto-Stop Rule" : "Auto Trail Rule"}
+          </button>
 
           {stopRules.length > 0 && (
             <div style={{ marginTop: 14, overflowX: "auto" }}>
               <table>
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Trigger</th><th>New Stop</th><th>Status</th><th>Detail</th></tr></thead>
+                <thead><tr><th>Symbol</th><th>Dir</th><th>Mode</th><th>Entry</th><th>Trigger</th><th>Stop / Trail</th><th>Ratchets</th><th>Status</th><th>Detail</th></tr></thead>
                 <tbody>
                   {stopRules.map((r) => (
                     <tr key={r.id}>
                       <td>{r.symbol}</td>
                       <td>{r.direction.toUpperCase()}</td>
+                      <td><span className={`tag ${r.mode === "trail" ? "long" : "na"}`}>{r.mode === "trail" ? "TRAIL" : "FIXED"}</span></td>
                       <td>{r.entryPrice.toFixed(2)}</td>
                       <td>+{r.triggerOffset}</td>
-                      <td>{r.newStopPrice !== null ? r.newStopPrice.toFixed(2) : `entry+${r.newStopOffset}`}</td>
+                      <td>
+                        {r.mode === "trail"
+                          ? `${r.trailAmount} pts / every ${r.checkFrequency} pts`
+                          : (r.newStopPrice !== null ? r.newStopPrice.toFixed(2) : `entry+${r.newStopOffset}`)}
+                      </td>
+                      <td>{r.mode === "trail" ? r.ratchetCount : "—"}</td>
                       <td>
                         <span className={`tag ${r.status === "triggered" && r.verified ? "clean" : r.status === "active" ? "long" : "flag"}`}>
                           {r.status === "triggered" ? (r.verified ? "MOVED ✓" : "UNVERIFIED ⚠") : r.status.toUpperCase()}
@@ -1698,7 +2586,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
               </div>
             ))}
             <table>
-              <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Time in Trade</th><th>Source</th></tr></thead>
+              <thead><tr><th>Symbol</th><th>Net Pos</th><th>Avg Price</th><th>P&amp;L</th><th>Time in Trade</th><th>Source</th><th>Modify Stop</th></tr></thead>
               <tbody>
                 {currentPositions.map((p, i) => {
                   const isStale = p.pnlSource === "estimated" && p.loggedPriceAgeMinutes !== null && p.loggedPriceAgeMinutes > 10;
@@ -1722,6 +2610,18 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                          p.pnlSource === "estimated" ? `Estimated @ ${p.loggedPrice?.toFixed(2)} (${p.loggedPriceAgeMinutes!.toFixed(0)} min ago)` :
                          "No price logged"}
                       </td>
+                      <td>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <input
+                            type="number" step="0.25" placeholder="new stop" style={{ width: 90 }}
+                            value={stopInputs[p.symbol] || ""}
+                            onChange={(e) => setStopInputs((s) => ({ ...s, [p.symbol]: e.target.value }))}
+                          />
+                          <button className="btn small ghost" disabled={stopModifyBusy === p.symbol} onClick={() => submitStopModify(p.symbol)}>
+                            {stopModifyBusy === p.symbol ? "…" : "Update"}
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -1738,7 +2638,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table>
-              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>SL / Target</th><th>Status</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Time</th><th>Env</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th><th>SL / Target</th><th>Status</th><th>Detail</th><th>Add Reason</th></tr></thead>
               <tbody>
                 {logs.map((l) => (
                   <tr key={l.id}>
@@ -1751,6 +2651,7 @@ function TradeTicketTab({ settings }: { settings: Settings }) {
                     <td>{l.stopLossPrice && l.targetPrice ? `${l.stopLossPrice} / ${l.targetPrice}` : "—"}</td>
                     <td><span className={`tag ${l.status === "SUBMITTED" ? "clean" : l.status === "ALLOWED" ? "na" : "flag"}`}>{l.status}</span></td>
                     <td style={{ maxWidth: 260, whiteSpace: "normal" }}>{l.blockedReason || l.tradovateOrderId || "—"}</td>
+                    <td style={{ maxWidth: 220, whiteSpace: "normal" }}>{l.addReason || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1780,8 +2681,8 @@ function equityCurvePoints(trades: MatchedTrade[], w: number, h: number, pad: nu
 // actually render, same as any report that embeds a hosted chart library.
 // Zoom/pan isn't included here (would mean a second CDN plugin + version
 // matching to get right) — flag if that's still wanted after seeing these.
-async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<string> {
-  if (matchedTrades.length === 0) {
+async function buildChartsHtml(items: { label: string; pnl: number; entryDate?: string | null; date?: string | null; entryPrice?: number | null }[]): Promise<string> {
+  if (items.length === 0) {
     return `<p style="color:#7F8CA6;font-size:13px;">No closed trades yet — charts will appear here once you have some.</p>`;
   }
 
@@ -1803,21 +2704,90 @@ async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<
   }
 
   let cum = 0;
-  const equityLabels = matchedTrades.map((t) => new Date(t.exitTime).toLocaleString());
-  const equityData = matchedTrades.map((t) => (cum += t.pnl));
-  const perTradePnl = matchedTrades.map((t) => t.pnl);
+  const dayKeys = items.map((t) => (t.date ? tradingDayKey(new Date(t.date)) : null));
+  const isMultiDay = new Set(dayKeys.filter((k) => k !== null)).size > 1;
+  // When this chart spans more than one trading day (a weekly report), a
+  // bare time like "07:37 AM" is genuinely ambiguous — several different
+  // days can share the same clock time. Prefixing with a short weekday
+  // fixes that in the tooltip/axis labels themselves; the background
+  // shading below (keyed off the same dayKeys) makes day boundaries
+  // visible on the chart at a glance too. Critically, the weekday shown
+  // here is derived from the SAME tradingDayKey (6pm ET rollover) used for
+  // the shading — not the raw calendar date of the timestamp — otherwise
+  // a trade at, say, 8pm Wednesday gets labeled "Wed" while the shading
+  // (correctly) already groups it with Thursday's trading day, and the
+  // two visibly disagree right at the boundary.
+  const equityLabels = items.map((t, i) => {
+    const key = dayKeys[i];
+    if (!isMultiDay || !key) return t.label;
+    const dayLabel = new Date(`${key}T12:00:00`).toLocaleDateString([], { weekday: "short" });
+    return `${dayLabel} ${t.label}`;
+  });
+  const equityData = items.map((t) => (cum += t.pnl));
+  const perTradePnl = items.map((t) => t.pnl);
   const perTradeColors = perTradePnl.map((p) => (p >= 0 ? "#3FD0C9" : "#E5484D"));
-  const wins = matchedTrades.filter((t) => t.pnl > 0).length;
-  const losses = matchedTrades.filter((t) => t.pnl <= 0).length;
+  const wins = items.filter((t) => t.pnl > 0).length;
+  const losses = items.filter((t) => t.pnl <= 0).length;
 
-  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses }).replace(/</g, "\\u003c");
+  // How many TRADE RECORDS were open at the same time as this one — a count
+  // of overlapping trades, not total contracts. If any of those trades were
+  // logged with size > 1, actual contract exposure at that moment was
+  // higher than this number. Counts itself, so 1 means it was never
+  // stacked with anything else. Only computable when both this trade and the one it's being compared against
+  // have a recorded entry time (real synced fills going forward, or manual
+  // entries with Entry Time filled in) — null otherwise rather than
+  // guessing. Two trades "overlap" if either one's entry happened before
+  // the other's exit, in both directions — the standard interval-overlap
+  // check, not just a same-symbol/same-direction one, since holding e.g. an
+  // NQ long and an MNQ short at once is still two concurrent positions.
+  const concurrentCounts: (number | null)[] = items.map((it) => {
+    if (!it.entryDate || !it.date) return null;
+    const entryI = new Date(it.entryDate).getTime();
+    const exitI = new Date(it.date).getTime();
+    let count = 0;
+    for (const other of items) {
+      if (!other.entryDate || !other.date) continue;
+      const entryJ = new Date(other.entryDate).getTime();
+      const exitJ = new Date(other.date).getTime();
+      if (entryI < exitJ && entryJ < exitI) count++;
+    }
+    return count;
+  });
+
+  // Same overlap check as above, but keeping the actual entry timestamp AND
+  // entry price of every trade that counted toward that number — so the
+  // tooltip can name them instead of just giving a bare count. Includes
+  // seconds since this app frequently logs several trades within the same
+  // minute. Price is shown as "—" for any trade missing entryPrice (older
+  // records) rather than silently omitting that trade from the list.
+  const concurrentEntryLabels: string[][] = items.map((it) => {
+    if (!it.entryDate || !it.date) return [];
+    const entryI = new Date(it.entryDate).getTime();
+    const exitI = new Date(it.date).getTime();
+    const overlapping: { entryTime: number; entryPrice: number | null | undefined }[] = [];
+    for (const other of items) {
+      if (!other.entryDate || !other.date) continue;
+      const entryJ = new Date(other.entryDate).getTime();
+      const exitJ = new Date(other.date).getTime();
+      if (entryI < exitJ && entryJ < exitI) overlapping.push({ entryTime: entryJ, entryPrice: other.entryPrice });
+    }
+    return overlapping
+      .sort((a, b) => a.entryTime - b.entryTime)
+      .map((o) => {
+        const timeLabel = new Date(o.entryTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const priceLabel = o.entryPrice !== null && o.entryPrice !== undefined ? o.entryPrice : "—";
+        return `${timeLabel} @ ${priceLabel}`;
+      });
+  });
+
+  const dataJson = JSON.stringify({ equityLabels, equityData, perTradePnl, perTradeColors, wins, losses, concurrentCounts, concurrentEntryLabels, dayKeys }).replace(/</g, "\\u003c");
 
   return `
 <canvas id="equityChart" height="90"></canvas>
 <h2>P&amp;L Per Trade</h2>
 <canvas id="pnlBarChart" height="90"></canvas>
 <h2>Win / Loss</h2>
-<canvas id="winLossChart" height="120" style="max-width:280px;"></canvas>
+<div style="width:220px;height:220px;"><canvas id="winLossChart"></canvas></div>
 <script>${chartJsSource}</script>
 <script>
 (function() {
@@ -1826,6 +2796,38 @@ async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<
   var gridColor = "#263654";
   Chart.defaults.color = axisColor;
   Chart.defaults.font.family = "'Courier New', monospace";
+
+  // Alternates a faint background band each time dayKeys changes, so day
+  // boundaries are visible on the chart itself rather than only in the
+  // (now day-prefixed) axis labels — otherwise a multi-day chart reads as
+  // one undifferentiated line with repeating times like "07:37" showing
+  // up several times with no visual separation.
+  var dayBgPlugin = {
+    id: 'dayBg',
+    beforeDatasetsDraw: function(chart) {
+      var keys = d.dayKeys;
+      if (!keys || keys.length < 2) return;
+      var area = chart.chartArea;
+      var xScale = chart.scales.x;
+      var half = (xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) / 2;
+      var ctx = chart.ctx;
+      ctx.save();
+      var segStart = 0, toggle = 0;
+      for (var i = 1; i <= keys.length; i++) {
+        if (i === keys.length || keys[i] !== keys[segStart]) {
+          if (toggle % 2 === 1) {
+            var xStart = Math.max(area.left, xScale.getPixelForValue(segStart) - half);
+            var xEnd = Math.min(area.right, xScale.getPixelForValue(i - 1) + half);
+            ctx.fillStyle = 'rgba(127,140,166,0.08)';
+            ctx.fillRect(xStart, area.top, xEnd - xStart, area.bottom - area.top);
+          }
+          toggle++;
+          segStart = i;
+        }
+      }
+      ctx.restore();
+    }
+  };
 
   new Chart(document.getElementById('equityChart'), {
     type: 'line',
@@ -1839,11 +2841,21 @@ async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<
         fill: true,
         tension: 0.15,
         pointRadius: 3,
-        pointBackgroundColor: d.equityData.map(function(v) { return v >= 0 ? '#3FD0C9' : '#E5484D'; }),
+        pointBackgroundColor: d.perTradePnl.map(function(p) { return p >= 0 ? '#3FD0C9' : '#E5484D'; }),
       }]
     },
+    plugins: [dayBgPlugin],
     options: {
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) { return 'Cumulative: ' + ctx.parsed.y.toFixed(2); } } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(ctx) {
+        var tradePnl = d.perTradePnl[ctx.dataIndex];
+        var concurrent = d.concurrentCounts[ctx.dataIndex];
+        var lines = ['This trade: ' + (tradePnl >= 0 ? '+' : '') + tradePnl.toFixed(2), 'Cumulative: ' + ctx.parsed.y.toFixed(2)];
+        lines.push(concurrent === null ? 'Concurrent trades: unknown (no entry time)' : 'Concurrent trades: ' + concurrent);
+        if (concurrent !== null && concurrent > 1) {
+          lines.push('Entered at: ' + d.concurrentEntryLabels[ctx.dataIndex].join(', '));
+        }
+        return lines;
+      } } } },
       scales: {
         x: { ticks: { maxRotation: 60, minRotation: 60 }, grid: { color: gridColor } },
         y: { grid: { color: gridColor } }
@@ -1872,10 +2884,39 @@ async function buildAnalyticsChartsHtml(matchedTrades: MatchedTrade[]): Promise<
       labels: ['Wins (' + d.wins + ')', 'Losses (' + d.losses + ')'],
       datasets: [{ data: [d.wins, d.losses], backgroundColor: ['#3FD0C9', '#E5484D'] }]
     },
-    options: { plugins: { legend: { position: 'bottom' } } }
+    options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
   });
 })();
 </script>`;
+}
+
+// Same logic as findAddedToLoserInstances, but for MatchedTrade (TV
+// Analytics' Tradovate FIFO data) instead of Journal Trade records. This
+// data always has real entry/exit times, so detection works on every trade
+// here — no entryDate-missing gap like the Journal has for older entries.
+type AddedToLoserMatchedInstance = { earlier: MatchedTrade; later: MatchedTrade };
+function findAddedToLoserInstancesMatched(matchedTrades: MatchedTrade[]): AddedToLoserMatchedInstance[] {
+  const results: AddedToLoserMatchedInstance[] = [];
+  for (const later of matchedTrades) {
+    let best: MatchedTrade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of matchedTrades) {
+      if (earlier === later) continue;
+      if (earlier.symbol !== later.symbol || earlier.side !== later.side) continue;
+      const earlierEntry = new Date(earlier.entryTime).getTime();
+      const earlierExit = new Date(earlier.exitTime).getTime();
+      const laterEntry = new Date(later.entryTime).getTime();
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const adverse = earlier.side === "long" ? later.entryPrice < earlier.entryPrice : later.entryPrice > earlier.entryPrice;
+      if (!adverse) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
+    }
+    if (best) results.push({ earlier: best, later });
+  }
+  return results;
 }
 
 async function buildAnalyticsHtmlReport(
@@ -1885,11 +2926,13 @@ async function buildAnalyticsHtmlReport(
   totalPnl: number,
   winRate: number
 ) {
+  const addedToLoser = findAddedToLoserInstancesMatched(matchedTrades);
+  const laterKeys = new Set(addedToLoser.map((i) => i.later.entryTime + i.later.exitTime));
   const rows = matchedTrades
     .map(
       (t) => `
-    <tr>
-      <td>${new Date(t.exitTime).toLocaleString()}</td>
+    <tr${laterKeys.has(t.entryTime + t.exitTime) ? ' style="background:rgba(229,72,77,0.15);"' : ""}>
+      <td>${laterKeys.has(t.entryTime + t.exitTime) ? "\u26a0 " : ""}${new Date(t.exitTime).toLocaleString()}</td>
       <td>${t.symbol}</td>
       <td>${t.side.toUpperCase()}</td>
       <td>${t.qty}</td>
@@ -1918,8 +2961,13 @@ th{color:#7F8CA6;text-transform:uppercase;font-size:11px;}
 <div class="stat"><b>${matchedTrades.length}</b>Closed Trades</div>
 <div class="stat"><b>${winRate}%</b>Win Rate</div>
 <div class="stat"><b>${cashBalance?.netLiq !== undefined ? fmtMoney(cashBalance.netLiq) : "—"}</b>Net Liquidity (live)</div>
+${addedToLoser.length > 0 ? `
+<div style="border:1px solid #E5484D;border-radius:6px;padding:12px 14px;background:rgba(229,72,77,0.08);margin:16px 0;">
+  <div style="font-weight:bold;margin-bottom:6px;">\u26a0 Added to a losing position \u2014 ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
+  ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.side.toUpperCase()}: entered ${inst.earlier.entryPrice.toFixed(2)} at ${new Date(inst.earlier.entryTime).toLocaleString()}, then added at ${inst.later.entryPrice.toFixed(2)} at ${new Date(inst.later.entryTime).toLocaleString()} while the first was still open and underwater.</div>`).join("")}
+</div>` : ""}
 <h2>Equity Curve (Realized, FIFO-matched)</h2>
-${await buildAnalyticsChartsHtml(matchedTrades)}
+${await buildChartsHtml(matchedTrades.map((t) => ({ label: new Date(t.exitTime).toLocaleString(), pnl: t.pnl, entryDate: t.entryTime, date: t.exitTime, entryPrice: t.entryPrice })))}
 <h2>Closed Trades (FIFO matched)</h2>
 <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th></tr></thead>
 <tbody>${rows || '<tr><td colspan="7">No closed trades yet.</td></tr>'}</tbody></table>
@@ -2052,7 +3100,7 @@ function findSyncedTrade(mt: MatchedTrade, trades: Trade[]): Trade | undefined {
   });
 }
 
-function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Settings; trades: Trade[]; onTradeSynced: (t: Trade) => void }) {
+function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { settings: Settings; trades: Trade[]; onTradeSynced: (t: Trade) => void; onTradeUpdated: (t: Trade) => void }) {
   const [accountId, setAccountId] = useState("");
   const [accounts, setAccounts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2064,8 +3112,22 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
   useEffect(() => {
     fetch(`/api/tradovate/status?env=${settings.tradovateEnv}`)
       .then((r) => r.json())
-      .then((d) => setAccounts(d.accounts || []));
-  }, [settings.tradovateEnv]);
+      .then((d) => {
+        setAccounts(d.accounts || []);
+        // Prefers the account pinned in Settings for this environment,
+        // falling back to auto-select only when there's genuinely just one
+        // account and nothing configured.
+        const preferredId = settings.tradovateEnv === "live" ? settings.liveAccountId : settings.demoAccountId;
+        const preferredMatch = preferredId
+          ? d.accounts?.find((a: any) => String(a.id) === String(preferredId) || String(a.name) === String(preferredId))
+          : null;
+        if (preferredMatch) {
+          setAccountId(String(preferredMatch.id));
+        } else if (d.accounts?.length === 1) {
+          setAccountId(String(d.accounts[0].id));
+        }
+      });
+  }, [settings.tradovateEnv, settings.liveAccountId, settings.demoAccountId]);
 
   async function sync() {
     if (!accountId) {
@@ -2117,6 +3179,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
         plannedStop: null,
         plannedTarget: null,
         date: t.exitTime,
+        entryDate: t.entryTime,
       }),
     }).then((r) => r.json());
     onTradeSynced(trade);
@@ -2133,6 +3196,40 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
       setSyncMsg(`\u2713 Synced ${unsyncedTrades.length} trade${unsyncedTrades.length === 1 ? "" : "s"} to the Journal.`);
     } catch (err: any) {
       setSyncMsg(`\u26a0 Sync failed: ${err.message || String(err)}`);
+    }
+    setSyncing(false);
+    setTimeout(() => setSyncMsg(null), 4000);
+  }
+
+  // Backfills entryDate on existing Journal trades that were synced before
+  // that field existed. Matches each pulled Tradovate fill against an
+  // existing Journal entry using the exact same criteria as
+  // findSyncedTrade (symbol/side/entry/exit price + exit time within a
+  // minute) — only updates trades that are a confident match and currently
+  // missing entryDate; never touches anything else.
+  async function backfillEntryDates() {
+    const candidates = matchedTrades
+      .map((mt) => ({ mt, existing: findSyncedTrade(mt, trades) }))
+      .filter((x): x is { mt: MatchedTrade; existing: Trade } => !!x.existing && x.existing.entryDate === null);
+    if (candidates.length === 0) {
+      setSyncMsg("No trades needed backfilling \u2014 either already have entry times, or aren't matched to a pulled fill.");
+      setTimeout(() => setSyncMsg(null), 4000);
+      return;
+    }
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      for (const { mt, existing } of candidates) {
+        const updated = await fetch(`/api/trades/${existing.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entryDate: mt.entryTime }),
+        }).then((r) => r.json());
+        onTradeUpdated(updated);
+      }
+      setSyncMsg(`\u2713 Backfilled entry times on ${candidates.length} trade${candidates.length === 1 ? "" : "s"}.`);
+    } catch (err: any) {
+      setSyncMsg(`\u26a0 Backfill failed: ${err.message || String(err)}`);
     }
     setSyncing(false);
     setTimeout(() => setSyncMsg(null), 4000);
@@ -2175,6 +3272,14 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
                   title={matchedTrades.length === 0 ? "No closed trades to sync yet" : unsyncedTrades.length === 0 ? "All closed trades are already in the Journal" : undefined}
                 >
                   {syncing ? "Syncing…" : unsyncedTrades.length === 0 && matchedTrades.length > 0 ? "All Synced" : `Sync to Journal${unsyncedTrades.length ? ` (${unsyncedTrades.length})` : ""}`}
+                </button>
+                <button
+                  className="btn small ghost"
+                  onClick={backfillEntryDates}
+                  disabled={syncing || matchedTrades.length === 0}
+                  title="Fills in missing entry times on already-synced Journal trades, matched against pulled Tradovate fills — needed for Hold Time and the 'added to a losing position' detection to work on older trades."
+                >
+                  {syncing ? "Working…" : "Backfill Entry Times"}
                 </button>
                 <button
                   className="btn small ghost"
@@ -2321,8 +3426,8 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced }: { settings: Setting
   );
 }
 
-function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: EmotionalEntry[] }) {
-  if (trades.length === 0) {
+function Dashboard({ trades, allTrades, emoEntries, envLabel }: { trades: Trade[]; allTrades: Trade[]; emoEntries: EmotionalEntry[]; envLabel: string }) {
+  if (allTrades.length === 0) {
     return (
       <>
         <div className="panel-box"><div className="empty-state"><div className="big">📊</div>No data yet. Your stats will appear here once you start logging trades.</div></div>
@@ -2330,9 +3435,26 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </>
     );
   }
+  // Was previously all-time, which meant these three numbers could never
+  // reconcile against the top bar's "Today's P&L" — the whole reason this
+  // panel exists is to answer "does today's P&L mix Demo and Live," so it
+  // needs to use the same "today" scope as that card, not every trade ever.
+  const todayStr = tradingDayKey(new Date());
+  const todaysAllTrades = allTrades.filter((t) => tradingDayKey(new Date(t.date)) === todayStr);
+  const envBuckets: { label: string; trades: Trade[] }[] = [
+    { label: "Live", trades: todaysAllTrades.filter((t) => t.source === "live") },
+    { label: "Demo", trades: todaysAllTrades.filter((t) => t.source === "demo") },
+    { label: "Manual (legacy, env unknown)", trades: todaysAllTrades.filter((t) => t.source === "manual") },
+  ];
+  const allTimeEnvBuckets: { label: string; trades: Trade[] }[] = [
+    { label: "Live", trades: allTrades.filter((t) => t.source === "live") },
+    { label: "Demo", trades: allTrades.filter((t) => t.source === "demo") },
+    { label: "Manual (legacy, env unknown)", trades: allTrades.filter((t) => t.source === "manual") },
+  ];
+
   const wins = trades.filter((t) => t.pnl > 0).length;
   const losses = trades.filter((t) => t.pnl < 0).length;
-  const winRate = Math.round((wins / trades.length) * 100);
+  const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0;
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
   const avgWin = wins ? trades.filter((t) => t.pnl > 0).reduce((s, t) => s + t.pnl, 0) / wins : 0;
   const avgLoss = losses ? Math.abs(trades.filter((t) => t.pnl < 0).reduce((s, t) => s + t.pnl, 0) / losses) : 0;
@@ -2368,8 +3490,40 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
   return (
     <>
       <div className="panel-box">
+        <div className="panel-title">P&amp;L by Account — Today (Live vs. Demo)</div>
+        <div className="panel-desc">Matches the scope of the "Today's P&amp;L" card at the top of the app — these three numbers should sum to that figure.</div>
+        <div className="stat-grid">
+          {envBuckets.map((b) => {
+            const total = b.trades.reduce((s, t) => s + t.pnl, 0);
+            return (
+              <div className="stat-box" key={b.label}>
+                <div className={`stat-num ${b.trades.length === 0 ? "" : total >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+                  {b.trades.length === 0 ? "—" : fmtMoney(total)}
+                </div>
+                <div className="stat-lbl">{b.label} ({b.trades.length})</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="panel-title" style={{ marginTop: 18, fontSize: 13, opacity: 0.75 }}>All-Time (for reference, not scoped to today)</div>
+        <div className="stat-grid">
+          {allTimeEnvBuckets.map((b) => {
+            const total = b.trades.reduce((s, t) => s + t.pnl, 0);
+            return (
+              <div className="stat-box" key={b.label}>
+                <div className={`stat-num ${b.trades.length === 0 ? "" : total >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+                  {b.trades.length === 0 ? "—" : fmtMoney(total)}
+                </div>
+                <div className="stat-lbl">{b.label} ({b.trades.length})</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-          <div className="panel-title" style={{ margin: 0 }}>Performance Summary</div>
+          <div className="panel-title" style={{ margin: 0 }}>Performance Summary — All-Time ({envLabel} + manual)</div>
           <button className="btn small ghost" onClick={() => downloadTradesCSV(trades)}>Export CSV</button>
         </div>
         <div className="stat-grid">
@@ -2387,7 +3541,7 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </div>
 
       <div className="panel-box">
-        <div className="panel-title">Plan Discipline</div>
+        <div className="panel-title">Plan Discipline — All-Time ({envLabel} + manual)</div>
         <div className="panel-desc">
           Compares what actually happened to your own stated plan (planned stop / target, logged with the trade) —
           not a judgment call, just your plan vs. your execution. {tradesWithAPlan} of {trades.length} trades had a plan declared.
@@ -2414,14 +3568,14 @@ function Dashboard({ trades, emoEntries }: { trades: Trade[]; emoEntries: Emotio
       </div>
 
       <div className="panel-box">
-        <div className="panel-title">Equity Curve</div>
+        <div className="panel-title">Equity Curve — All-Time ({envLabel} + manual)</div>
         <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
           <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="var(--line)" strokeDasharray="4 4" />
           <polyline points={coords} fill="none" stroke={curveColor} strokeWidth="2" />
         </svg>
       </div>
       <div className="panel-box">
-        <div className="panel-title">Disciplined vs. Undisciplined</div>
+        <div className="panel-title">Disciplined vs. Undisciplined — All-Time ({envLabel} + manual)</div>
         <div className="panel-desc">Does following your rules actually pay?</div>
         <div className="compare-bars">
           <CompareRow label="Clean avg P&L" value={cleanAvg} max={maxAbs} display={fmtMoney(cleanAvg)} />
@@ -2477,7 +3631,7 @@ function EmotionalPatternsPanel({ trades, emoEntries }: { trades: Trade[]; emoEn
 
   const entryDays = new Map<string, EmotionalEntry[]>();
   emoEntries.forEach((e) => {
-    const key = new Date(e.date).toDateString();
+    const key = tradingDayKey(new Date(e.date));
     if (!entryDays.has(key)) entryDays.set(key, []);
     entryDays.get(key)!.push(e);
   });
@@ -2655,7 +3809,13 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
           </div>
           <div className="field"><label>Point Multiplier ($/pt)</label><input type="number" value={local.multiplier} onChange={(e) => setLocal({ ...local, multiplier: parseFloat(e.target.value) })} /></div>
           <div className="field"><label>Daily Loss Limit ($)</label><input type="number" value={local.dailyLossLimit} onChange={(e) => setLocal({ ...local, dailyLossLimit: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Max Concurrent Adds (contracts, per symbol/direction)</label><input type="number" min={1} value={local.maxConcurrentAdds} onChange={(e) => setLocal({ ...local, maxConcurrentAdds: parseInt(e.target.value) })} /></div>
+          <div className="field"><label>Add-On Cooldown (minutes between same-direction entries)</label><input type="number" min={0} value={local.addOnCooldownMinutes} onChange={(e) => setLocal({ ...local, addOnCooldownMinutes: parseInt(e.target.value) })} /></div>
+          <div className="field"><label>Unrealized Loss Alert ($, Live only, 0 = off)</label><input type="number" min={0} value={local.unrealizedLossAlertThreshold} onChange={(e) => setLocal({ ...local, unrealizedLossAlertThreshold: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Post-Loss Cooldown ($) — any symbol</label><input type="number" min={0} value={local.postLossCooldownThreshold} onChange={(e) => setLocal({ ...local, postLossCooldownThreshold: parseFloat(e.target.value) })} /></div>
+          <div className="field"><label>Post-Loss Cooldown (minutes)</label><input type="number" min={0} value={local.postLossCooldownMinutes} onChange={(e) => setLocal({ ...local, postLossCooldownMinutes: parseInt(e.target.value) })} /></div>
         </div>
+        <div className="panel-desc" style={{ marginTop: -4, marginBottom: 8 }}>The two above are hard blocks in the Trade Ticket — enforced on both Demo and Live — built after a week's report showed up to 11 concurrent longs stacked with a ~1-minute median gap between adds. The Unrealized Loss Alert is different — not a block, an email the first time an open Live position's unrealized loss crosses this number, checked roughly every minute around the clock (not just equity market hours). It can't stop a trade placed directly in Tradovate itself, but it shrinks the time between a trade going underwater and you actually knowing it. Post-Loss Cooldown is a hard block too, but scoped differently — ANY new order, any symbol, is paused for this many minutes after a single closed trade loses at least this much, built after "Tilted / Revenge" journal entries describing impulsive re-entries that weren't limited to the same losing position.</div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
       </div>
 
@@ -2716,16 +3876,137 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
             <option value="live">Live</option>
           </select>
         </div>
+        <div className="grid2">
+          <div className="field">
+            <label>Preferred Live Account ID (optional)</label>
+            <input
+              value={local.liveAccountId ?? ""}
+              onChange={(e) => setLocal({ ...local, liveAccountId: e.target.value || null })}
+              placeholder="e.g. 1003033"
+            />
+          </div>
+          <div className="field">
+            <label>Preferred Demo Account ID (optional)</label>
+            <input
+              value={local.demoAccountId ?? ""}
+              onChange={(e) => setLocal({ ...local, demoAccountId: e.target.value || null })}
+              placeholder="e.g. 1234567"
+            />
+          </div>
+        </div>
+        <div className="panel-desc" style={{ marginTop: -8 }}>
+          If more than one account shows up for an environment, this one gets auto-selected on Trade Ticket and TV Analytics instead of asking you to pick every time. Leave blank if there's only ever one account — it'll auto-select on its own.
+        </div>
         <button className="btn primary" onClick={() => onSave(local)}>Save Settings</button>
+      </div>
+
+      <div className="panel-box">
+        <div className="panel-title">Session</div>
+        <div className="panel-desc">Log out of this device — you'll need your username and password to log back in.</div>
+        <button
+          className="btn small ghost"
+          onClick={async () => {
+            await fetch("/api/auth/logout", { method: "POST" });
+            window.location.href = "/login";
+          }}
+        >
+          Log Out
+        </button>
       </div>
     </>
   );
 }
 
+// Only computable when entryDate is actually known (real synced Tradovate
+// fills going forward) — returns null rather than guessing for manual
+// entries or trades synced before entryDate existed.
+// Finds instances where a trade's entry happened while an earlier,
+// same-symbol, same-direction trade's position was still open, at a price
+// that made the earlier position worse (further underwater) rather than
+// better. Only works for trades with entryDate populated — for anything
+// missing it (older manual entries, trades synced before entryDate
+// existed), there's no way to know if positions overlapped in time at all,
+// so those are silently excluded rather than guessed.
+type AddedToLoserInstance = { earlier: Trade; later: Trade };
+function findAddedToLoserInstances(trades: Trade[]): AddedToLoserInstance[] {
+  const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
+  const results: AddedToLoserInstance[] = [];
+  for (const later of withEntry) {
+    // Picks only the single most recent qualifying prior position, rather
+    // than every earlier position this trade happened to overlap with —
+    // otherwise a chain of 5 sequential adds reports as 10 combinatorial
+    // pairs instead of the 4 actual add-on decisions that happened.
+    let best: Trade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of withEntry) {
+      if (earlier.id === later.id) continue;
+      if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
+      const earlierEntry = new Date(earlier.entryDate!).getTime();
+      const earlierExit = new Date(earlier.date).getTime();
+      const laterEntry = new Date(later.entryDate!).getTime();
+      // "later" must have entered while "earlier" was still open.
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const adverse = earlier.dir === "long" ? later.entry! < earlier.entry! : later.entry! > earlier.entry!;
+      if (!adverse) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
+    }
+    if (best) results.push({ earlier: best, later });
+  }
+  return results;
+}
+
+// Mirror of findAddedToLoserInstances — same overlap logic, but flagging the
+// opposite (and desirable) pattern: adding to an already-open position at a
+// price that's moving further in your favor, i.e. pyramiding a winner rather
+// than averaging down a loser. Kept as a fully separate function (rather
+// than a shared helper with a flag) to match the existing style here, and
+// because a tie (later.entry === earlier.entry) should count as neither —
+// that's handled by simply inverting the adverse check's strict inequality,
+// not by "not adverse".
+type AddedToWinnerInstance = { earlier: Trade; later: Trade };
+function findAddedToWinnerInstances(trades: Trade[]): AddedToWinnerInstance[] {
+  const withEntry = trades.filter((t) => t.entryDate && t.entry !== null);
+  const results: AddedToWinnerInstance[] = [];
+  for (const later of withEntry) {
+    let best: Trade | null = null;
+    let bestEntryTime = -Infinity;
+    for (const earlier of withEntry) {
+      if (earlier.id === later.id) continue;
+      if (earlier.symbol !== later.symbol || earlier.dir !== later.dir) continue;
+      const earlierEntry = new Date(earlier.entryDate!).getTime();
+      const earlierExit = new Date(earlier.date).getTime();
+      const laterEntry = new Date(later.entryDate!).getTime();
+      if (!(laterEntry > earlierEntry && laterEntry < earlierExit)) continue;
+      const favorable = earlier.dir === "long" ? later.entry! > earlier.entry! : later.entry! < earlier.entry!;
+      if (!favorable) continue;
+      if (earlierEntry > bestEntryTime) {
+        bestEntryTime = earlierEntry;
+        best = earlier;
+      }
+    }
+    if (best) results.push({ earlier: best, later });
+  }
+  return results;
+}
+
+function holdTimeLabel(t: Trade): string | null {
+  if (!t.entryDate) return null;
+  const ms = new Date(t.date).getTime() - new Date(t.entryDate).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
 function groupTradesByDay(trades: Trade[]) {
   const map = new Map<string, Trade[]>();
   trades.forEach((t) => {
-    const key = new Date(t.date).toDateString();
+    const key = tradingDayKey(new Date(t.date));
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(t);
   });
@@ -2736,8 +4017,13 @@ function groupTradesByDay(trades: Trade[]) {
       const clean = dayTrades.filter((t) => t.disciplined === true).length;
       const flagged = dayTrades.filter((t) => t.disciplined === false).length;
       const unrated = dayTrades.filter((t) => t.disciplined === null).length;
+      // dateStr is "YYYY-MM-DD" (a stable grouping/sort key); displayLabel
+      // is the friendly version shown in the UI — parsed at noon to avoid
+      // timezone edge cases when turning the bare date back into a Date.
+      const displayLabel = new Date(`${dateStr}T12:00:00`).toDateString();
       return {
         dateStr,
+        displayLabel,
         trades: dayTrades,
         pnl,
         winRate: Math.round((wins / dayTrades.length) * 100),
@@ -2749,16 +4035,145 @@ function groupTradesByDay(trades: Trade[]) {
     .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
 }
 
-function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) {
-  const doc = new jsPDF();
+// weekStartKey now lives in lib/tradingWindow.ts (shared with the
+// server-side weekly-report cron) — imported at the top of this file.
+
+function groupTradesByWeek(trades: Trade[]) {
+  const map = new Map<string, Trade[]>();
+  trades.forEach((t) => {
+    const key = weekStartKey(new Date(t.date));
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(t);
+  });
+  return Array.from(map.entries())
+    .map(([dateStr, weekTrades]) => {
+      const pnl = weekTrades.reduce((s, t) => s + t.pnl, 0);
+      const wins = weekTrades.filter((t) => t.pnl > 0).length;
+      const clean = weekTrades.filter((t) => t.disciplined === true).length;
+      const flagged = weekTrades.filter((t) => t.disciplined === false).length;
+      const unrated = weekTrades.filter((t) => t.disciplined === null).length;
+      const sunday = new Date(`${dateStr}T12:00:00`);
+      const friday = new Date(sunday.getTime() + 5 * 24 * 60 * 60 * 1000);
+      const displayLabel = `Week of ${sunday.toLocaleDateString([], { month: "short", day: "numeric" })} – ${friday.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}`;
+      return {
+        dateStr,
+        displayLabel,
+        trades: weekTrades,
+        pnl,
+        winRate: Math.round((wins / weekTrades.length) * 100),
+        clean,
+        flagged,
+        unrated,
+      };
+    })
+    .sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
+}
+
+async function buildDayReportHtml(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], reportLabel: string = "Daily", dayEmoEntries: EmotionalEntry[] = []): Promise<string> {
+  const addedToLoser = findAddedToLoserInstances(day.trades);
+  const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+  const addedToWinner = findAddedToWinnerInstances(day.trades);
+  const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
+  const rows = day.trades
+    .map(
+      (t) => `
+    <tr${laterIds.has(t.id) ? ' style="background:rgba(229,72,77,0.15);"' : winnerIds.has(t.id) ? ' style="background:rgba(63,208,201,0.15);"' : ""}>
+      <td>${laterIds.has(t.id) ? "\u26a0" : winnerIds.has(t.id) ? "\u2605" : ""}</td>
+      <td>${new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${t.symbol}</td>
+      <td>${t.source.toUpperCase()}</td>
+      <td>${t.dir.toUpperCase()}</td>
+      <td>${t.entry ?? "-"}</td>
+      <td>${t.exit ?? "-"}</td>
+      <td>${holdTimeLabel(t) ?? "-"}</td>
+      <td style="color:${t.pnl >= 0 ? "#3FD0C9" : "#E5484D"}">${fmtMoney(t.pnl)}</td>
+      <td>${t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</td>
+      <td>${t.emotion || "-"}</td>
+    </tr>`
+    )
+    .join("");
+
+  const chartsHtml = await buildChartsHtml(
+    day.trades.map((t) => ({ label: new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), pnl: t.pnl, entryDate: t.entryDate, date: t.date, entryPrice: t.entry }))
+  );
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8" />
+<style>
+  body{background:#0B1220;color:#E8EDF5;font-family:'Courier New',monospace;padding:24px;}
+  h1{color:#F5A623;margin:0 0 4px;font-size:22px;}
+  h2{color:#3FD0C9;font-size:15px;margin:22px 0 8px;}
+  .sub{color:#7F8CA6;margin:0 0 16px;}
+  .stats{display:flex;gap:24px;margin-bottom:16px;font-size:14px;flex-wrap:wrap;}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px;}
+  th{text-align:left;padding:6px 10px;color:#7F8CA6;border-bottom:1px solid #263654;}
+  td{padding:6px 10px;border-bottom:1px solid #263654;}
+</style></head>
+<body>
+  <h1>NQ COCKPIT — ${reportLabel} Report</h1>
+  <p class="sub">${day.displayLabel}</p>
+  <div class="stats">
+    <div><strong>P&amp;L:</strong> ${fmtMoney(day.pnl)}</div>
+    <div><strong>Trades:</strong> ${day.trades.length}</div>
+    <div><strong>Win rate:</strong> ${day.winRate}%</div>
+    <div><strong>Clean/Flagged${day.unrated ? "/Unrated" : ""}:</strong> ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}</div>
+  </div>
+  ${addedToLoser.length > 0 ? `
+  <div style="border:1px solid #E5484D;border-radius:6px;padding:12px 14px;background:rgba(229,72,77,0.08);margin-bottom:16px;">
+    <div style="font-weight:bold;margin-bottom:6px;">\u26a0 Added to a losing position \u2014 ${addedToLoser.length} instance${addedToLoser.length === 1 ? "" : "s"}</div>
+    ${addedToLoser.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.</div>`).join("")}
+  </div>` : ""}
+  ${addedToWinner.length > 0 ? `
+  <div style="border:1px solid #3FD0C9;border-radius:6px;padding:12px 14px;background:rgba(63,208,201,0.08);margin-bottom:16px;">
+    <div style="font-weight:bold;margin-bottom:6px;">\u2605 Added to a winning position \u2014 ${addedToWinner.length} instance${addedToWinner.length === 1 ? "" : "s"}</div>
+    ${addedToWinner.map((inst) => `<div style="color:#7F8CA6;font-size:13px;margin-top:4px;">${inst.earlier.symbol} ${inst.earlier.dir.toUpperCase()}: entered ${inst.earlier.entry} at ${new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, then added at ${inst.later.entry} at ${new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.</div>`).join("")}
+  </div>` : ""}
+  <h2>Equity Curve</h2>
+  ${chartsHtml}
+  <h2>Trades</h2>
+  <table>
+    <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  ${daySnapshots.length > 0 ? `
+  <h2>Chart Snapshots</h2>
+  <div style="display:flex;flex-wrap:wrap;gap:16px;">
+    ${daySnapshots.map((s) => `
+    <div style="width:320px;">
+      <img src="${s.imageData}" style="width:100%;border-radius:6px;border:1px solid #263654;" />
+      <div style="color:#7F8CA6;font-size:12px;margin-top:4px;">${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? ` \u2014 ${s.note}` : ""}</div>
+    </div>`).join("")}
+  </div>` : ""}
+  ${dayEmoEntries.length > 0 ? `
+  <h2>Emotional Journal</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Tag</th><th>Note</th></tr></thead>
+    <tbody>
+    ${dayEmoEntries.map((e) => `
+    <tr>
+      <td>${new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${e.tag || "\u2014"}</td>
+      <td>${e.note}</td>
+    </tr>`).join("")}
+    </tbody>
+  </table>` : ""}
+</body></html>`;
+}
+
+async function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number], daySnapshots: ChartSnapshot[] = [], envLabel: "all" | "live" | "demo" = "all", reportLabel: string = "Daily", dayEmoEntries: EmotionalEntry[] = []) {
+  const doc = new jsPDF({ orientation: "landscape" });
+  const addedToLoser = findAddedToLoserInstances(day.trades);
+  const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+  const addedToWinner = findAddedToWinnerInstances(day.trades);
+  const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
   let y = 20;
   doc.setFont("courier", "bold");
   doc.setFontSize(16);
-  doc.text("NQ COCKPIT — Daily Report", 14, y);
+  doc.text(`NQ COCKPIT — ${reportLabel} Report`, 14, y);
   y += 8;
   doc.setFontSize(10);
   doc.setFont("courier", "normal");
-  doc.text(day.dateStr, 14, y);
+  doc.text(day.displayLabel, 14, y);
   y += 10;
 
   doc.setFontSize(11);
@@ -2766,71 +4181,416 @@ function downloadDayReportPDF(day: ReturnType<typeof groupTradesByDay>[number]) 
   doc.text(`Trades: ${day.trades.length}`, 70, y);
   doc.text(`Win rate: ${day.winRate}%`, 120, y);
   doc.text(`Clean/Flagged${day.unrated ? "/Unrated" : ""}: ${day.clean}/${day.flagged}${day.unrated ? "/" + day.unrated : ""}`, 160, y);
-  y += 10;
+  y += 8;
 
+  if (addedToLoser.length > 0) {
+    doc.setTextColor(229, 72, 77);
+    doc.text(`! Added to a losing position \u00d7 ${addedToLoser.length} (marked with ! below)`, 14, y);
+    doc.setTextColor(0, 0, 0);
+    y += 8;
+  }
+  if (addedToWinner.length > 0) {
+    doc.setTextColor(63, 208, 201);
+    doc.text(`+ Added to a winning position \u00d7 ${addedToWinner.length} (marked with + below)`, 14, y);
+    doc.setTextColor(0, 0, 0);
+    y += 8;
+  }
+  if (addedToLoser.length === 0 && addedToWinner.length === 0) {
+    y += 2;
+  }
+
+  const cols = [
+    { label: "", x: 14 },
+    { label: "Time", x: 20 },
+    { label: "Symbol", x: 40 },
+    { label: "Account", x: 58 },
+    { label: "Dir", x: 80 },
+    { label: "Entry", x: 98 },
+    { label: "Exit", x: 120 },
+    { label: "Hold", x: 142 },
+    { label: "P&L", x: 164 },
+    { label: "Discipline", x: 190 },
+    { label: "Emotion", x: 222 },
+  ];
   doc.setFont("courier", "bold");
-  doc.text("Time", 14, y);
-  doc.text("Dir", 45, y);
-  doc.text("Setup", 65, y);
-  doc.text("P&L", 110, y);
-  doc.text("Discipline", 140, y);
-  doc.text("Emotion", 170, y);
+  cols.forEach((c) => doc.text(c.label, c.x, y));
   y += 6;
   doc.setFont("courier", "normal");
 
   day.trades.forEach((t) => {
-    if (y > 280) {
+    if (y > 195) {
       doc.addPage();
       y = 20;
     }
     const time = new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    doc.text(time, 14, y);
-    doc.text(t.dir.toUpperCase(), 45, y);
-    doc.text((t.setup || "-").slice(0, 20), 65, y);
-    doc.text(fmtMoney(t.pnl), 110, y);
-    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", 140, y);
-    doc.text((t.emotion || "-").slice(0, 18), 170, y);
+    if (laterIds.has(t.id)) {
+      doc.setTextColor(229, 72, 77);
+      doc.text("!", cols[0].x, y);
+    } else if (winnerIds.has(t.id)) {
+      doc.setTextColor(63, 208, 201);
+      doc.text("+", cols[0].x, y);
+    }
+    doc.text(time, cols[1].x, y);
+    doc.text(t.symbol, cols[2].x, y);
+    doc.text(t.source.toUpperCase(), cols[3].x, y);
+    doc.text(t.dir.toUpperCase(), cols[4].x, y);
+    doc.text(t.entry !== null ? String(t.entry) : "-", cols[5].x, y);
+    doc.text(t.exit !== null ? String(t.exit) : "-", cols[6].x, y);
+    doc.text(holdTimeLabel(t) ?? "-", cols[7].x, y);
+    doc.text(fmtMoney(t.pnl), cols[8].x, y);
+    doc.text(t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED", cols[9].x, y);
+    doc.text((t.emotion || "-").slice(0, 14), cols[10].x, y);
+    if (laterIds.has(t.id) || winnerIds.has(t.id)) doc.setTextColor(0, 0, 0);
     y += 6;
   });
 
-  doc.save(`nq-cockpit-report-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
+  if (daySnapshots.length > 0) {
+    doc.addPage();
+    y = 20;
+    doc.setFont("courier", "bold");
+    doc.setFontSize(14);
+    doc.text("Chart Snapshots", 14, y);
+    y += 10;
+    doc.setFont("courier", "normal");
+    doc.setFontSize(10);
+
+    const maxWidth = 260; // landscape page is ~297mm wide, leaving margins
+    const maxHeight = 140;
+    for (const s of daySnapshots) {
+      // Reads the image's real dimensions so it's embedded at the correct
+      // aspect ratio (contain-fit within a max box) instead of stretched.
+      const dims = await new Promise<{ w: number; h: number }>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve({ w: maxWidth, h: maxHeight });
+        img.src = s.imageData;
+      });
+      const scale = Math.min(maxWidth / dims.w, maxHeight / dims.h);
+      const w = dims.w * scale;
+      const h = dims.h * scale;
+      if (y + h + 12 > 200) {
+        doc.addPage();
+        y = 20;
+      }
+      const label = `${new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${s.note ? " \u2014 " + s.note : ""}`;
+      doc.text(label, 14, y);
+      y += 6;
+      doc.addImage(s.imageData, "JPEG", 14, y, w, h);
+      y += h + 12;
+    }
+  }
+
+  if (dayEmoEntries.length > 0) {
+    doc.addPage();
+    y = 20;
+    doc.setFont("courier", "bold");
+    doc.setFontSize(14);
+    doc.text("Emotional Journal", 14, y);
+    y += 10;
+    doc.setFont("courier", "normal");
+    doc.setFontSize(10);
+    for (const e of dayEmoEntries) {
+      if (y > 190) {
+        doc.addPage();
+        y = 20;
+      }
+      const time = new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      doc.setFont("courier", "bold");
+      doc.text(`${time}${e.tag ? "  [" + e.tag + "]" : ""}`, 14, y);
+      doc.setFont("courier", "normal");
+      y += 6;
+      // Wrap the note text to the page width rather than letting long
+      // entries run off the right edge.
+      const wrapped = doc.splitTextToSize(e.note, 260);
+      doc.text(wrapped, 14, y);
+      y += wrapped.length * 5 + 8;
+    }
+  }
+
+  doc.save(`nq-cockpit-${reportLabel.toLowerCase()}-report-${envLabel}-${day.dateStr.replace(/\s+/g, "-")}.pdf`);
 }
 
-function ReportsTab({ trades }: { trades: Trade[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const days = groupTradesByDay(trades);
+function formatHourLabel(h: number): string {
+  const period = h < 12 ? "a" : "p";
+  let displayHour = h % 12;
+  if (displayHour === 0) displayHour = 12;
+  return `${displayHour}${period}`;
+}
 
-  if (days.length === 0) {
-    return <div className="panel-box"><div className="empty-state"><div className="big">🗒️</div>No trades logged yet — daily reports will appear here once you start.</div></div>;
+function median(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+// Pulls every day's add-on instances (loser and winner) together into one
+// cross-day view. The per-day callouts elsewhere on this tab show WHAT
+// happened on any single day — this shows whether it's a recurring habit
+// or a one-off. Only trades with entryDate populated feed into this (same
+// limitation as the per-day detectors), so days made up entirely of older
+// or manual entries without it simply won't contribute any instances.
+function AddOnPatternsPanel({ days }: { days: ReturnType<typeof groupTradesByDay> }) {
+  const loserInstances: { earlier: Trade; later: Trade }[] = [];
+  const winnerInstances: { earlier: Trade; later: Trade }[] = [];
+  const daysWithLoserAdd = new Set<string>();
+  const daysWithWinnerAdd = new Set<string>();
+
+  for (const day of days) {
+    const loser = findAddedToLoserInstances(day.trades);
+    const winner = findAddedToWinnerInstances(day.trades);
+    if (loser.length > 0) daysWithLoserAdd.add(day.dateStr);
+    if (winner.length > 0) daysWithWinnerAdd.add(day.dateStr);
+    loserInstances.push(...loser);
+    winnerInstances.push(...winner);
   }
+
+  if (loserInstances.length === 0 && winnerInstances.length === 0) {
+    return (
+      <div className="panel-box" style={{ marginTop: 12 }}>
+        <div className="panel-title" style={{ marginBottom: 2 }}>Add-On Patterns (All Days)</div>
+        <div className="panel-desc" style={{ marginBottom: 0 }}>No adding-to-an-open-position instances detected yet across {days.length} day(s) — this needs trades with a recorded Entry Time (synced fills, or manual entries with it filled in) to work.</div>
+      </div>
+    );
+  }
+
+  const longCount = loserInstances.filter((i) => i.earlier.dir === "long").length;
+  const shortCount = loserInstances.filter((i) => i.earlier.dir === "short").length;
+
+  const gapMinutes = loserInstances
+    .filter((i) => i.earlier.entryDate && i.later.entryDate)
+    .map((i) => (new Date(i.later.entryDate!).getTime() - new Date(i.earlier.entryDate!).getTime()) / 60000);
+  const medianGap = median(gapMinutes);
+
+  // Trading-day order (6pm–6pm, matching how the rest of the app defines
+  // "today") rather than plain midnight-to-midnight, so the bars read left
+  // to right the same way a trading session actually unfolds.
+  const hourOrder = Array.from({ length: 24 }, (_, i) => (18 + i) % 24);
+  const hourCounts = new Map<number, number>();
+  for (const inst of loserInstances) {
+    if (!inst.later.entryDate) continue;
+    const h = new Date(inst.later.entryDate).getHours();
+    hourCounts.set(h, (hourCounts.get(h) || 0) + 1);
+  }
+  const maxHourCount = Math.max(1, ...Array.from(hourCounts.values()));
+
+  return (
+    <div className="panel-box" style={{ marginTop: 12 }}>
+      <div className="panel-title" style={{ marginBottom: 2 }}>Add-On Patterns (All Days)</div>
+      <div className="panel-desc" style={{ marginBottom: 10 }}>Across {days.length} day(s) in this filter — is adding to open positions a recurring habit, and when does it tend to happen?</div>
+      <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div className="card-sub">Days with a losing add</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-neg">{daysWithLoserAdd.size} / {days.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Total losing-add instances</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-neg">{loserInstances.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Days with a winning add</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-pos">{daysWithWinnerAdd.size} / {days.length}</div>
+        </div>
+        <div>
+          <div className="card-sub">Total winning-add instances</div>
+          <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }} className="pnl-pos">{winnerInstances.length}</div>
+        </div>
+        {loserInstances.length > 0 && (
+          <div>
+            <div className="card-sub">Long vs. short (losing adds)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{longCount} long / {shortCount} short</div>
+          </div>
+        )}
+        {medianGap !== null && (
+          <div>
+            <div className="card-sub">Median time to add (losing)</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 20 }}>{medianGap < 1 ? "<1m" : `${Math.round(medianGap)}m`}</div>
+          </div>
+        )}
+      </div>
+      {loserInstances.length > 0 && (
+        <>
+          <div className="card-sub" style={{ marginBottom: 6 }}>When losing adds happen (by hour, trading-day order)</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 70 }}>
+            {hourOrder.map((h) => {
+              const count = hourCounts.get(h) || 0;
+              return (
+                <div key={h} title={`${formatHourLabel(h)}: ${count}`} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                  <div style={{ width: "100%", height: `${(count / maxHourCount) * 100}%`, background: count > 0 ? "var(--red)" : "var(--line)", opacity: count > 0 ? 0.7 : 0.3, borderRadius: 2, minHeight: 2 }} />
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+            {hourOrder.map((h) => (
+              <div key={h} style={{ flex: 1, textAlign: "center", fontSize: 9, color: "var(--muted)" }}>{h % 3 === 0 ? formatHourLabel(h) : ""}</div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ReportsTab({ trades, snapshots, emoEntries, settings }: { trades: Trade[]; snapshots: ChartSnapshot[]; emoEntries: EmotionalEntry[]; settings: Settings }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [envFilter, setEnvFilter] = useState<"all" | "live" | "demo">(settings.tradovateEnv === "live" ? "live" : "demo");
+  const [reportView, setReportView] = useState<"daily" | "weekly">("daily");
+  // Settings is the single source of truth for which environment you're
+  // looking at — whenever it changes elsewhere in the app, this follows
+  // automatically instead of silently staying on whatever was last picked
+  // here. "All accounts" is still available as a manual override below,
+  // it just won't persist across a Settings change.
+  useEffect(() => {
+    setEnvFilter(settings.tradovateEnv === "live" ? "live" : "demo");
+  }, [settings.tradovateEnv]);
+  const filteredTrades = envFilter === "all" ? trades : trades.filter((t) => t.source === envFilter);
+  const days = groupTradesByDay(filteredTrades);
+  // Weeks run Sunday 6pm ET (Globex's weekly reopen) through Friday 1pm ET —
+  // not the standard Mon-Fri calendar week — matching how this account
+  // actually thinks about a trading week.
+  const weeks = groupTradesByWeek(filteredTrades);
+  const groups = reportView === "daily" ? days : weeks;
 
   return (
     <div className="panel-box">
-      <div className="panel-title">Daily Reports</div>
-      <div className="panel-desc">Same numbers as your daily email, browsable here — plus a PDF download for any day.</div>
-      {days.map((day) => (
-        <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div className="panel-title" style={{ marginBottom: 2 }}>{reportView === "daily" ? "Daily Reports" : "Weekly Reports"}</div>
+          <div className="panel-desc" style={{ marginBottom: 0 }}>{reportView === "daily" ? "Same numbers as your daily email, browsable here — plus a PDF download for any day." : "Every day rolled into one report per trading week (Sun 6pm ET – Fri 1pm ET)."}</div>
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", border: "1px solid var(--line)", borderRadius: 6, overflow: "hidden", flexShrink: 0 }}>
+            <button
+              className="btn small ghost"
+              style={{ borderRadius: 0, whiteSpace: "nowrap", background: reportView === "daily" ? "var(--panel-2)" : undefined, color: reportView === "daily" ? "var(--cyan)" : undefined }}
+              onClick={() => setReportView("daily")}
+            >
+              Daily
+            </button>
+            <button
+              className="btn small ghost"
+              style={{ borderRadius: 0, whiteSpace: "nowrap", background: reportView === "weekly" ? "var(--panel-2)" : undefined, color: reportView === "weekly" ? "var(--cyan)" : undefined }}
+              onClick={() => setReportView("weekly")}
+            >
+              Weekly
+            </button>
+          </div>
+          <select value={envFilter} onChange={(e) => setEnvFilter(e.target.value as "all" | "live" | "demo")}>
+            <option value="all">All accounts</option>
+            <option value="live">Live only</option>
+            <option value="demo">Demo only</option>
+          </select>
+        </div>
+      </div>
+      <AddOnPatternsPanel days={days} />
+      {groups.length === 0 ? (
+        <div className="empty-state" style={{ marginTop: 12 }}><div className="big">🗒️</div>No trades logged for this filter yet.</div>
+      ) : (
+        groups.map((day) => {
+        const addedToLoser = findAddedToLoserInstances(day.trades);
+        const laterIds = new Set(addedToLoser.map((i) => i.later.id));
+        const addedToWinner = findAddedToWinnerInstances(day.trades);
+        const winnerIds = new Set(addedToWinner.map((i) => i.later.id));
+        const daySnapshots = snapshots.filter((s) => (reportView === "daily" ? tradingDayKey(new Date(s.date)) === day.dateStr : weekStartKey(new Date(s.date)) === day.dateStr));
+        // Only shown for Live — these entries are about real trading
+        // headspace, not Demo practice, so Demo/All views skip them
+        // entirely rather than mixing in journal notes that may not even
+        // be about the account being viewed.
+        const dayEmoEntries = envFilter === "live"
+          ? emoEntries.filter((e) => (reportView === "daily" ? tradingDayKey(new Date(e.date)) === day.dateStr : weekStartKey(new Date(e.date)) === day.dateStr))
+          : [];
+        return (
+        <div key={day.dateStr} style={{ border: "1px solid var(--line)", borderRadius: 8, marginBottom: 10, overflow: "hidden", marginTop: 12 }}>
           <div
             style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", cursor: "pointer", background: "var(--panel-2)" }}
             onClick={() => setExpanded(expanded === day.dateStr ? null : day.dateStr)}
           >
             <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-              <span className="card-label" style={{ marginBottom: 0 }}>{day.dateStr}</span>
+              <span className="card-label" style={{ marginBottom: 0 }}>{day.displayLabel}</span>
               <span className={day.pnl >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{fmtMoney(day.pnl)}</span>
               <span className="card-sub" style={{ marginTop: 0 }}>{day.trades.length} trade(s) · {day.winRate}% win · {day.clean} clean / {day.flagged} flagged{day.unrated ? ` / ${day.unrated} unrated` : ""}</span>
+              {addedToLoser.length > 0 && (
+                <span className="tag flag">⚠ Added to loser × {addedToLoser.length}</span>
+              )}
+              {addedToWinner.length > 0 && (
+                <span className="tag clean">★ Added to winner × {addedToWinner.length}</span>
+              )}
             </div>
-            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day); }}>Download PDF</button>
+            <button
+              className="btn small ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                const win = window.open("", "_blank");
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries).then((html) => {
+                  if (!win) return;
+                  const blob = new Blob([html], { type: "text/html" });
+                  win.location.href = URL.createObjectURL(blob);
+                });
+              }}
+            >
+              View HTML
+            </button>
+            <button
+              className="btn small ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                buildDayReportHtml(day, daySnapshots, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries).then((html) => {
+                  const blob = new Blob([html], { type: "text/html" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `nq-cockpit-${reportView}-report-${envFilter}-${day.dateStr.replace(/\s+/g, "-")}.html`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                });
+              }}
+            >
+              Download HTML
+            </button>
+            <button className="btn small ghost" onClick={(e) => { e.stopPropagation(); downloadDayReportPDF(day, daySnapshots, envFilter, reportView === "daily" ? "Daily" : "Weekly", dayEmoEntries); }}>Download PDF</button>
           </div>
           {expanded === day.dateStr && (
             <div style={{ padding: "12px 16px", overflowX: "auto" }}>
+              {addedToLoser.length > 0 && (
+                <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid var(--red)", borderRadius: 6, background: "rgba(229,72,77,0.08)" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>⚠ Added to a losing position — {addedToLoser.length} instance{addedToLoser.length === 1 ? "" : "s"}</div>
+                  {addedToLoser.map((inst, i) => (
+                    <div key={i} className="card-sub" style={{ marginTop: i === 0 ? 0 : 4 }}>
+                      {inst.earlier.symbol} {inst.earlier.dir.toUpperCase()}: entered {inst.earlier.entry} at {new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })},
+                      then added at {inst.later.entry} at {new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and underwater.
+                    </div>
+                  ))}
+                  <div className="card-sub" style={{ marginTop: 6, opacity: 0.7 }}>Only detects this for trades with a recorded entry time (Sync to Journal, or manually logged with Entry Time filled in) — older entries without one aren't included.</div>
+                </div>
+              )}
+              {addedToWinner.length > 0 && (
+                <div style={{ marginBottom: 12, padding: "10px 12px", border: "1px solid var(--cyan)", borderRadius: 6, background: "rgba(63,208,201,0.08)" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>★ Added to a winning position — {addedToWinner.length} instance{addedToWinner.length === 1 ? "" : "s"}</div>
+                  {addedToWinner.map((inst, i) => (
+                    <div key={i} className="card-sub" style={{ marginTop: i === 0 ? 0 : 4 }}>
+                      {inst.earlier.symbol} {inst.earlier.dir.toUpperCase()}: entered {inst.earlier.entry} at {new Date(inst.earlier.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })},
+                      then added at {inst.later.entry} at {new Date(inst.later.entryDate!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} while the first was still open and in profit.
+                    </div>
+                  ))}
+                  <div className="card-sub" style={{ marginTop: 6, opacity: 0.7 }}>Same entry-time requirement as the losing-position detector above.</div>
+                </div>
+              )}
               <table>
-                <thead><tr><th>Time</th><th>Dir</th><th>Setup</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
+                <thead><tr><th></th><th>Time</th><th>Symbol</th><th>Account</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P&amp;L</th><th>Discipline</th><th>Emotion</th></tr></thead>
                 <tbody>
                   {day.trades.map((t) => (
-                    <tr key={t.id}>
+                    <tr key={t.id} style={laterIds.has(t.id) ? { background: "rgba(229,72,77,0.12)" } : winnerIds.has(t.id) ? { background: "rgba(63,208,201,0.12)" } : undefined}>
+                      <td>{laterIds.has(t.id) ? "⚠" : winnerIds.has(t.id) ? "★" : ""}</td>
                       <td>{new Date(t.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+                      <td>{t.symbol}</td>
+                      <td><span className={`tag ${t.source === "live" ? "flag" : t.source === "demo" ? "clean" : "na"}`}>{t.source.toUpperCase()}</span></td>
                       <td><span className={`tag ${t.dir}`}>{t.dir.toUpperCase()}</span></td>
-                      <td>{t.setup || "—"}</td>
+                      <td>{t.entry ?? "—"}</td>
+                      <td>{t.exit ?? "—"}</td>
+                      <td>{holdTimeLabel(t) ?? "—"}</td>
                       <td className={t.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{fmtMoney(t.pnl)}</td>
                       <td><span className={`tag ${t.disciplined === null ? "na" : t.disciplined ? "clean" : "flag"}`}>{t.disciplined === null ? "N/A" : t.disciplined ? "CLEAN" : "FLAGGED"}</span></td>
                       <td>{t.emotion}</td>
@@ -2838,10 +4598,39 @@ function ReportsTab({ trades }: { trades: Trade[] }) {
                   ))}
                 </tbody>
               </table>
+              {daySnapshots.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div className="card-label">Chart Snapshots</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 6 }}>
+                    {daySnapshots.map((s) => (
+                      <div key={s.id} style={{ width: 200 }}>
+                        <img src={s.imageData} alt={s.note || "snapshot"} style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+                        <div className="card-sub" style={{ marginTop: 4 }}>{new Date(s.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{s.note ? ` — ${s.note}` : ""}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {dayEmoEntries.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div className="card-label">Emotional Journal</div>
+                  <div style={{ marginTop: 6 }}>
+                    {dayEmoEntries.map((e) => (
+                      <div key={e.id} style={{ padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                        <span className="card-sub" style={{ marginRight: 8 }}>{new Date(e.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        {e.tag && <span className="tag flag" style={{ marginRight: 8 }}>{e.tag}</span>}
+                        <span>{e.note}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
-      ))}
+        );
+        })
+      )}
     </div>
   );
 }

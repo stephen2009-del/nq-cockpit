@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { placeOrder, placeOSO, getAccounts, findOpenPosition, getEnrichedFills, extractPositionPnl, extractAccountOpenPnl, getCashBalance } from "@/lib/tradovate";
-import { getTradingWindowStatus, etTimeTodayToUtc } from "@/lib/tradingWindow";
+import { getTradingWindowStatus, etTimeTodayToUtc, tradingDayStart } from "@/lib/tradingWindow";
 import { checkAddingToLoser } from "@/lib/positionGuard";
 import { matchFillsToTrades } from "@/lib/fifoMatch";
 import { getActiveLockout, createLockout } from "@/lib/lockout";
-import { getFreshIntradayPrice, FRESHNESS_MINUTES } from "@/lib/lastKnownPrice";
+import { getFreshIntradayPrice, FRESHNESS_MINUTES, getLastKnownNqPrice } from "@/lib/lastKnownPrice";
 
 export async function GET() {
   const logs = await prisma.tradovateOrderLog.findMany({
@@ -17,7 +17,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { env, accountId, symbol, action, orderQty, orderType, price, stopLoss, target } = body;
+  const { env, accountId, symbol, action, orderQty, orderType, price, stopLoss, target, addReason } = body;
 
   if (!env || (env !== "demo" && env !== "live")) {
     return NextResponse.json({ error: "env must be 'demo' or 'live'" }, { status: 400 });
@@ -29,6 +29,66 @@ export async function POST(req: NextRequest) {
   let settings = await prisma.settings.findUnique({ where: { id: 1 } });
   if (!settings) {
     settings = await prisma.settings.create({ data: { id: 1 } });
+  }
+
+  // GUARD — post-loss cooldown, ANY symbol/direction. Every other guard in
+  // this file scopes to "adding to the same open position" — this one
+  // doesn't, because journal entries describing "Tilted / Revenge"
+  // behavior weren't limited to averaging into one losing trade; a loss on
+  // one symbol has repeatedly been followed by an impulsive new entry
+  // elsewhere. Deterministic (a real closed trade's real P&L, no
+  // fail-open/fail-closed ambiguity), so enforced identically on Demo and
+  // Live. 0 for either setting disables this guard entirely.
+  if (settings.postLossCooldownMinutes > 0 && settings.postLossCooldownThreshold > 0) {
+    const recentLoss = await prisma.trade.findFirst({
+      where: {
+        source: env,
+        pnl: { lte: -Math.abs(settings.postLossCooldownThreshold) },
+        date: { gte: new Date(Date.now() - settings.postLossCooldownMinutes * 60000) },
+      },
+      orderBy: { date: "desc" },
+    });
+    if (recentLoss) {
+      const minutesSince = (Date.now() - new Date(recentLoss.date).getTime()) / 60000;
+      const reason = `A ${recentLoss.symbol} trade closed for -$${Math.abs(recentLoss.pnl).toFixed(2)} ${minutesSince < 1 ? "under a minute" : `${Math.floor(minutesSince)} minute(s)`} ago \u2014 at or past your configured post-loss cooldown threshold of $${settings.postLossCooldownThreshold.toFixed(2)} (Settings \u2192 Post-Loss Cooldown). All new orders are paused for ${settings.postLossCooldownMinutes} minute(s) after a loss that size, regardless of symbol. Wait it out, or adjust the setting if this pace is genuinely intentional.`;
+      await prisma.tradovateOrderLog.create({
+        data: {
+          env, symbol, side: action, qty: parseInt(orderQty), orderType,
+          limitPrice: price ? parseFloat(price) : null,
+          status: "BLOCKED",
+          blockedReason: reason,
+        },
+      });
+      return NextResponse.json({ blocked: true, reason }, { status: 403 });
+    }
+  }
+
+  // GUARD — fat-finger limit price sanity check (server-side backstop).
+  // The Trade Ticket UI already asks for confirmation past a 3% deviation;
+  // this is a hard block for a much larger deviation (25%+, e.g. a typo'd
+  // extra digit) in case that client-side confirm was ever bypassed. Not a
+  // risk-management guard like the ones below — a resting limit far from
+  // market can be entirely intentional, which is exactly why the threshold
+  // here is deliberately wide (only egregious, near-certainly-a-typo cases
+  // get blocked outright) rather than matching the UI's 3% warning level.
+  if (orderType === "Limit" && price) {
+    const enteredPrice = parseFloat(price);
+    const lastKnown = await getLastKnownNqPrice();
+    if (Number.isFinite(enteredPrice) && enteredPrice > 0 && lastKnown !== null) {
+      const pctOff = Math.abs(enteredPrice - lastKnown) / lastKnown;
+      if (pctOff > 0.25) {
+        const reason = `Limit price ${enteredPrice} is ${(pctOff * 100).toFixed(0)}% away from the last known price (${lastKnown}) \u2014 blocked as a likely data-entry error (extra/missing digit). Double-check the price and resubmit if it's really intended.`;
+        await prisma.tradovateOrderLog.create({
+          data: {
+            env, symbol, side: action, qty: parseInt(orderQty), orderType,
+            limitPrice: parseFloat(price),
+            status: "BLOCKED",
+            blockedReason: reason,
+          },
+        });
+        return NextResponse.json({ blocked: true, reason }, { status: 403 });
+      }
+    }
   }
 
   // GUARD 0 — active manual/auto lockout. Checked before anything else.
@@ -99,6 +159,51 @@ export async function POST(req: NextRequest) {
       // closing, or reversing is always allowed regardless of data
       // availability — there's nothing to protect against there.
       if (newDirection === existingDirection) {
+        // GUARD 2a — hard concurrency cap. Deterministic (Tradovate's own
+        // netPos, no "can't verify" case), so enforced identically on demo
+        // and live, unlike the P&L guard below. Built directly off a week
+        // where this account stacked up to 11 concurrent longs in one
+        // symbol — this blocks outright once you're already at the
+        // configured max, rather than warning and letting it through.
+        const existingContracts = Math.abs(position.netPos);
+        if (existingContracts >= settings.maxConcurrentAdds) {
+          const reason = `Already holding ${existingContracts} contract(s) ${existingDirection} in ${symbol} \u2014 at or above your configured max of ${settings.maxConcurrentAdds} concurrent (Settings \u2192 Max Concurrent Adds). Close or reduce first, or raise the limit if this one's genuinely intentional.`;
+          await prisma.tradovateOrderLog.create({
+            data: {
+              env, symbol, side: action, qty: parseInt(orderQty), orderType,
+              limitPrice: price ? parseFloat(price) : null,
+              status: "BLOCKED",
+              blockedReason: reason,
+            },
+          });
+          return NextResponse.json({ blocked: true, reason }, { status: 403 });
+        }
+
+        // GUARD 2b — cooldown between same-direction entries. The same
+        // week showed a median gap of ~1 minute between an entry and the
+        // next add — not a reassessment, closer to a reflex. This blocks
+        // any same-direction order within the configured window of the
+        // last one that actually went through for this symbol/env/account.
+        const lastSameDirection = await prisma.tradovateOrderLog.findFirst({
+          where: { env, symbol, side: action, status: "SUBMITTED" },
+          orderBy: { date: "desc" },
+        });
+        if (lastSameDirection) {
+          const minutesSince = (Date.now() - new Date(lastSameDirection.date).getTime()) / 60000;
+          if (minutesSince < settings.addOnCooldownMinutes) {
+            const reason = `Your last ${existingDirection} entry in ${symbol} was ${minutesSince < 1 ? "under a minute" : `${Math.floor(minutesSince)} minute(s)`} ago \u2014 below your configured cooldown of ${settings.addOnCooldownMinutes} minute(s) between same-direction entries (Settings \u2192 Add-On Cooldown). Wait it out, or adjust the setting if this pace is genuinely intentional.`;
+            await prisma.tradovateOrderLog.create({
+              data: {
+                env, symbol, side: action, qty: parseInt(orderQty), orderType,
+                limitPrice: price ? parseFloat(price) : null,
+                status: "BLOCKED",
+                blockedReason: reason,
+              },
+            });
+            return NextResponse.json({ blocked: true, reason }, { status: 403 });
+          }
+        }
+
         let directPnl = extractPositionPnl(position);
         let pnlSource: "position" | "account" | "logged_price" = "position";
 
@@ -209,12 +314,11 @@ export async function POST(req: NextRequest) {
   try {
     const enrichedFills = await getEnrichedFills(env, parseInt(accountId));
     const now = new Date();
-    // Was: new Date(now.getFullYear(), now.getMonth(), now.getDate()), which
-    // uses the SERVER's local timezone (UTC on Railway) — that silently rolls
-    // "today" over at 5pm Pacific instead of midnight, not matching what a
-    // trader means by "today's" realized P&L. Use the same ET-based boundary
-    // the trading-window logic already uses elsewhere.
-    const startOfDay = etTimeTodayToUtc("00:00", now);
+    // A "trading day" runs 6pm ET to 6pm ET the next day (CME Globex
+    // convention), not midnight — matches tradingDayKey/tradingDayStart used
+    // everywhere else in the app now, so this guard's "today" agrees with
+    // what the UI shows as "today."
+    const startOfDay = tradingDayStart(now);
     const todaysFills = enrichedFills.filter((f: any) => new Date(f.timestamp) >= startOfDay);
     const matched = matchFillsToTrades(todaysFills as any, settings.multiplier);
     const todaysRealizedPnl = matched.reduce((s, t) => s + t.pnl, 0);
@@ -283,6 +387,7 @@ export async function POST(req: NextRequest) {
         limitPrice: price ? parseFloat(price) : null,
         stopLossPrice: hasBracket ? parseFloat(stopLoss) : null,
         targetPrice: hasBracket ? parseFloat(target) : null,
+        addReason: addReason || null,
         status: result.ok ? "SUBMITTED" : "ERROR",
         tradovateOrderId: result.ok ? String(result.body.orderId ?? "") : null,
         rawResponse: result.body,

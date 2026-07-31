@@ -27,4 +27,55 @@ export async function register() {
   }, 60_000);
 
   console.log("Intraday auto-log scheduler started (every 60s, regular market hours only).");
+
+  // Separate poller: checks real Tradovate position P&L (Live only) every
+  // 60s and emails an alert the first time a position's unrealized loss
+  // crosses the configured threshold. Deliberately NOT limited to equity
+  // market hours like the poller above — this reads Tradovate's own
+  // position data directly, which is live whenever NQ itself is
+  // tradeable on Globex, including overnight, where nothing else in this
+  // app currently has any visibility at all. Built specifically to
+  // shrink the gap between a trade going underwater and knowing about
+  // it, aimed at the moment before an averaging-down sequence starts.
+  const { checkUnrealizedLossAlerts } = await import("@/lib/positionAlert");
+
+  setInterval(() => {
+    checkUnrealizedLossAlerts().catch((err) => {
+      console.error("Unrealized-loss alert scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Unrealized-loss alert scheduler started (every 60s, Live account, all hours).");
+
+  // Third poller, same 60s cadence: notices a position that appeared
+  // directly in Tradovate with no matching order in this app's own log —
+  // can't block a trade placed outside the app entirely, but surfaces it
+  // within about a minute instead of only finding out from an admission
+  // days later.
+  const { checkBypassAlerts } = await import("@/lib/positionAlert");
+
+  setInterval(() => {
+    checkBypassAlerts().catch((err) => {
+      console.error("Bypass-detection scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Bypass-detection scheduler started (every 60s, Live account, all hours).");
+
+  // Fourth poller: Automatic Stop Management — both the one-shot
+  // breakeven-style move and continuous Auto Trail ratcheting. Previously
+  // only externally-triggerable, meaning a trailing stop was only as
+  // responsive as whatever cron schedule was pinging it; wiring it into
+  // the same 60s in-process loop as everything else makes it actually
+  // behave like Tradovate's own ATM Auto Trail, checked continuously
+  // rather than on an external schedule someone has to remember to set up.
+  const { checkStopRules } = await import("@/lib/stopRuleCheck");
+
+  setInterval(() => {
+    checkStopRules().catch((err) => {
+      console.error("Stop-rule check scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Stop-rule (Automatic Stop Management / Auto Trail) scheduler started (every 60s).");
 }

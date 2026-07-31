@@ -37,6 +37,13 @@ export async function PUT(req: NextRequest) {
     openingBufferMinutes: isLocked ? existing.openingBufferMinutes : (parseInt(body.openingBufferMinutes) ?? 10),
     // One-way: can go false -> true, never true -> false via this endpoint.
     tradingWindowLocked: isLocked ? true : !!body.tradingWindowLocked,
+    liveAccountId: body.liveAccountId || null,
+    demoAccountId: body.demoAccountId || null,
+    maxConcurrentAdds: Number.isFinite(parseInt(body.maxConcurrentAdds)) ? Math.max(1, parseInt(body.maxConcurrentAdds)) : 2,
+    addOnCooldownMinutes: Number.isFinite(parseInt(body.addOnCooldownMinutes)) ? Math.max(0, parseInt(body.addOnCooldownMinutes)) : 3,
+    unrealizedLossAlertThreshold: Number.isFinite(parseFloat(body.unrealizedLossAlertThreshold)) ? Math.max(0, parseFloat(body.unrealizedLossAlertThreshold)) : 500,
+    postLossCooldownMinutes: Number.isFinite(parseInt(body.postLossCooldownMinutes)) ? Math.max(0, parseInt(body.postLossCooldownMinutes)) : 5,
+    postLossCooldownThreshold: Number.isFinite(parseFloat(body.postLossCooldownThreshold)) ? Math.max(0, parseFloat(body.postLossCooldownThreshold)) : 300,
   };
 
   const settings = await prisma.settings.update({ where: { id: 1 }, data });
