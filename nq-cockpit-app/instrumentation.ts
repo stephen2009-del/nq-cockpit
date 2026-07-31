@@ -61,4 +61,21 @@ export async function register() {
   }, 60_000);
 
   console.log("Bypass-detection scheduler started (every 60s, Live account, all hours).");
+
+  // Fourth poller: Automatic Stop Management — both the one-shot
+  // breakeven-style move and continuous Auto Trail ratcheting. Previously
+  // only externally-triggerable, meaning a trailing stop was only as
+  // responsive as whatever cron schedule was pinging it; wiring it into
+  // the same 60s in-process loop as everything else makes it actually
+  // behave like Tradovate's own ATM Auto Trail, checked continuously
+  // rather than on an external schedule someone has to remember to set up.
+  const { checkStopRules } = await import("@/lib/stopRuleCheck");
+
+  setInterval(() => {
+    checkStopRules().catch((err) => {
+      console.error("Stop-rule check scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Stop-rule (Automatic Stop Management / Auto Trail) scheduler started (every 60s).");
 }

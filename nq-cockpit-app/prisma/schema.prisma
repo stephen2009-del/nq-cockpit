@@ -151,8 +151,17 @@ model StopManagementRule {
   direction      String    // "long" or "short"
   entryPrice     Float
   qty            Int
-  triggerOffset  Float     // points from entry that trigger the move
-  newStopOffset  Float     // points from entry for the new stop price
+  triggerOffset  Float     // points from entry that trigger the move (or, in "trail" mode, the profit needed to activate trailing)
+  newStopOffset  Float?    // points from entry for the new stop price — "oneshot" mode only
+  // Auto Trail fields (Tradovate ATM-style continuous trailing) — "trail"
+  // mode only. Once profit crosses triggerOffset, the stop ratchets to
+  // stay trailAmount behind the best price seen, re-checked every time
+  // price advances another checkFrequency points. Never loosens.
+  mode             String  @default("oneshot") // "oneshot" | "trail"
+  trailAmount      Float?
+  checkFrequency   Float?
+  lastRatchetPrice Float?
+  ratchetCount     Int     @default(0)
   status         String    @default("active") // active | triggered | failed | cancelled
   triggeredAt    DateTime?
   newStopPrice   Float?

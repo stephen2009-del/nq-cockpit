@@ -1910,7 +1910,12 @@ type StopRule = {
   entryPrice: number;
   qty: number;
   triggerOffset: number;
-  newStopOffset: number;
+  mode: string;
+  newStopOffset: number | null;
+  trailAmount: number | null;
+  checkFrequency: number | null;
+  lastRatchetPrice: number | null;
+  ratchetCount: number;
   status: string;
   triggeredAt: string | null;
   newStopPrice: number | null;
@@ -2031,18 +2036,30 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
   }
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
-  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+  const [stopRuleMode, setStopRuleMode] = useState<"oneshot" | "trail">("oneshot");
+  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "", trailAmount: "", checkFrequency: "" });
 
   function refreshStopRules() {
     fetch("/api/tradovate/stop-rules").then((r) => r.json()).then(setStopRules);
   }
 
   async function addStopRule() {
-    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset || !stopRuleForm.newStopOffset) {
-      alert("Fill in account, entry price, trigger offset, and new stop offset (contract must be resolved too).");
+    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset) {
+      alert("Fill in account, entry price, and trigger (contract must be resolved too).");
       return;
     }
-    if (!confirm(`This will automatically move your stop once price moves ${stopRuleForm.triggerOffset} points in your favor — with NO manual confirmation. Tradovate's own API has documented cases of silently failing to actually move the order. Continue?`)) {
+    if (stopRuleMode === "oneshot" && !stopRuleForm.newStopOffset) {
+      alert("Fill in the new stop offset for a one-shot rule.");
+      return;
+    }
+    if (stopRuleMode === "trail" && (!stopRuleForm.trailAmount || !stopRuleForm.checkFrequency)) {
+      alert("Fill in the trail amount and check frequency for an Auto Trail rule.");
+      return;
+    }
+    const confirmMsg = stopRuleMode === "oneshot"
+      ? `This will automatically move your stop once price moves ${stopRuleForm.triggerOffset} points in your favor — with NO manual confirmation. Tradovate's own API has documented cases of silently failing to actually move the order. Continue?`
+      : `This will continuously trail your stop ${stopRuleForm.trailAmount} points behind price once you're ${stopRuleForm.triggerOffset} points in profit, ratcheting every ${stopRuleForm.checkFrequency} points of favorable movement — with NO manual confirmation, checked roughly every minute. It never loosens, only tightens. Continue?`;
+    if (!confirm(confirmMsg)) {
       return;
     }
     await fetch("/api/tradovate/stop-rules", {
@@ -2055,10 +2072,13 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
         entryPrice: stopRuleForm.entryPrice,
         qty: form.qty,
         triggerOffset: stopRuleForm.triggerOffset,
-        newStopOffset: stopRuleForm.newStopOffset,
+        mode: stopRuleMode,
+        newStopOffset: stopRuleMode === "oneshot" ? stopRuleForm.newStopOffset : undefined,
+        trailAmount: stopRuleMode === "trail" ? stopRuleForm.trailAmount : undefined,
+        checkFrequency: stopRuleMode === "trail" ? stopRuleForm.checkFrequency : undefined,
       }),
     });
-    setStopRuleForm({ entryPrice: "", triggerOffset: "", newStopOffset: "" });
+    setStopRuleForm({ entryPrice: "", triggerOffset: "", newStopOffset: "", trailAmount: "", checkFrequency: "" });
     refreshStopRules();
   }
 
@@ -2456,40 +2476,64 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
           <div className="card-label" style={{ marginBottom: 8 }}>AUTOMATIC STOP MANAGEMENT</div>
           <div className="panel-desc" style={{ marginTop: 0 }}>
-            Once price moves a set number of points in your favor, this automatically moves your stop to lock in profit —
-            no manual click, no confirmation.
+            <b>Fixed Move</b> moves your stop once, at a set trigger. <b>Auto Trail</b> continuously ratchets your stop to
+            stay a fixed distance behind price once you're in profit — same idea as Tradovate's own ATM Auto Trail template.
           </div>
           <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
             ⚠ Tradovate's own API has documented, unresolved cases of reporting a successful modification when the stop
             did not actually move. This app verifies afterward and will flag it loudly if that happens — but the
-            modification itself runs with no human confirmation. Checked on a schedule (however often your cron job
-            pings), not instantly.
+            modification itself runs with no human confirmation. Checked automatically roughly every 60 seconds.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button className={`btn small ${stopRuleMode === "oneshot" ? "primary" : "ghost"}`} onClick={() => setStopRuleMode("oneshot")}>Fixed Move</button>
+            <button className={`btn small ${stopRuleMode === "trail" ? "primary" : "ghost"}`} onClick={() => setStopRuleMode("trail")}>Auto Trail</button>
           </div>
           <div className="grid3">
             <div className="field"><label>Entry Price</label>
               <input type="number" step="0.25" value={stopRuleForm.entryPrice} onChange={(e) => setStopRuleForm({ ...stopRuleForm, entryPrice: e.target.value })} placeholder="e.g. 28777" />
             </div>
-            <div className="field"><label>Trigger (pts in your favor)</label>
+            <div className="field"><label>{stopRuleMode === "oneshot" ? "Trigger (pts in your favor)" : "Profit Trigger (pts, activates trailing)"}</label>
               <input type="number" step="0.25" value={stopRuleForm.triggerOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, triggerOffset: e.target.value })} placeholder="e.g. 11" />
             </div>
-            <div className="field"><label>New Stop (pts from entry)</label>
-              <input type="number" step="0.25" value={stopRuleForm.newStopOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, newStopOffset: e.target.value })} placeholder="e.g. 4" />
-            </div>
+            {stopRuleMode === "oneshot" ? (
+              <div className="field"><label>New Stop (pts from entry)</label>
+                <input type="number" step="0.25" value={stopRuleForm.newStopOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, newStopOffset: e.target.value })} placeholder="e.g. 4" />
+              </div>
+            ) : (
+              <div className="field"><label>Trail Amount (pts behind price)</label>
+                <input type="number" step="0.25" value={stopRuleForm.trailAmount} onChange={(e) => setStopRuleForm({ ...stopRuleForm, trailAmount: e.target.value })} placeholder="e.g. 6.5" />
+              </div>
+            )}
           </div>
-          <button className="btn small ghost" style={{ borderColor: "var(--red)", color: "var(--red)" }} onClick={addStopRule}>Create Auto-Stop Rule</button>
+          {stopRuleMode === "trail" && (
+            <div className="grid3">
+              <div className="field"><label>Frequency (pts between ratchets)</label>
+                <input type="number" step="0.25" value={stopRuleForm.checkFrequency} onChange={(e) => setStopRuleForm({ ...stopRuleForm, checkFrequency: e.target.value })} placeholder="e.g. 8.75" />
+              </div>
+            </div>
+          )}
+          <button className="btn small ghost" style={{ borderColor: "var(--red)", color: "var(--red)" }} onClick={addStopRule}>
+            Create {stopRuleMode === "oneshot" ? "Auto-Stop Rule" : "Auto Trail Rule"}
+          </button>
 
           {stopRules.length > 0 && (
             <div style={{ marginTop: 14, overflowX: "auto" }}>
               <table>
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Trigger</th><th>New Stop</th><th>Status</th><th>Detail</th></tr></thead>
+                <thead><tr><th>Symbol</th><th>Dir</th><th>Mode</th><th>Entry</th><th>Trigger</th><th>Stop / Trail</th><th>Ratchets</th><th>Status</th><th>Detail</th></tr></thead>
                 <tbody>
                   {stopRules.map((r) => (
                     <tr key={r.id}>
                       <td>{r.symbol}</td>
                       <td>{r.direction.toUpperCase()}</td>
+                      <td><span className={`tag ${r.mode === "trail" ? "long" : "na"}`}>{r.mode === "trail" ? "TRAIL" : "FIXED"}</span></td>
                       <td>{r.entryPrice.toFixed(2)}</td>
                       <td>+{r.triggerOffset}</td>
-                      <td>{r.newStopPrice !== null ? r.newStopPrice.toFixed(2) : `entry+${r.newStopOffset}`}</td>
+                      <td>
+                        {r.mode === "trail"
+                          ? `${r.trailAmount} pts / every ${r.checkFrequency} pts`
+                          : (r.newStopPrice !== null ? r.newStopPrice.toFixed(2) : `entry+${r.newStopOffset}`)}
+                      </td>
+                      <td>{r.mode === "trail" ? r.ratchetCount : "—"}</td>
                       <td>
                         <span className={`tag ${r.status === "triggered" && r.verified ? "clean" : r.status === "active" ? "long" : "flag"}`}>
                           {r.status === "triggered" ? (r.verified ? "MOVED ✓" : "UNVERIFIED ⚠") : r.status.toUpperCase()}
