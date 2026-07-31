@@ -2051,7 +2051,11 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
   }
 
   async function addStopRule() {
-    if (!form.accountId || !resolvedSymbol?.symbol || !stopRuleForm.entryPrice || !stopRuleForm.triggerOffset) {
+    // Same fallback as the input's displayed value — if Entry Price was
+    // never manually touched, it mirrors the current Limit Price rather
+    // than being genuinely empty.
+    const effectiveEntryPrice = stopRuleForm.entryPrice || (form.orderType === "Limit" ? form.price : "");
+    if (!form.accountId || !resolvedSymbol?.symbol || !effectiveEntryPrice || !stopRuleForm.triggerOffset) {
       alert("Fill in account, entry price, and trigger (contract must be resolved too).");
       return;
     }
@@ -2076,7 +2080,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
         accountId: form.accountId,
         symbol: resolvedSymbol.symbol,
         direction: form.action === "Buy" ? "long" : "short",
-        entryPrice: stopRuleForm.entryPrice,
+        entryPrice: effectiveEntryPrice,
         qty: form.qty,
         triggerOffset: stopRuleForm.triggerOffset,
         mode: stopRuleMode,
@@ -2506,7 +2510,12 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
           </div>
           <div className="grid3">
             <div className="field"><label>Entry Price</label>
-              <input type="number" step="0.25" value={stopRuleForm.entryPrice} onChange={(e) => setStopRuleForm({ ...stopRuleForm, entryPrice: e.target.value })} placeholder="e.g. 28777" />
+              <input
+                type="number" step="0.25"
+                value={stopRuleForm.entryPrice || (form.orderType === "Limit" ? form.price : "")}
+                onChange={(e) => setStopRuleForm({ ...stopRuleForm, entryPrice: e.target.value })}
+                placeholder="e.g. 28777"
+              />
             </div>
             <div className="field"><label>{stopRuleMode === "oneshot" ? "Trigger (pts in your favor)" : "Profit Trigger (pts, activates trailing)"}</label>
               <input type="number" step="0.25" value={stopRuleForm.triggerOffset} onChange={(e) => setStopRuleForm({ ...stopRuleForm, triggerOffset: e.target.value })} placeholder="e.g. 11" />
