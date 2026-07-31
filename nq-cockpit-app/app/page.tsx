@@ -119,7 +119,7 @@ function roundToTick(price: number, tick: number = 0.25): number {
 // inputs afterward, so a specific trade can override either number right
 // up until submit — this only sets the starting point instead of leaving
 // both blank.
-const DEFAULT_STOP_POINTS = 18;
+const DEFAULT_STOP_POINTS = 47.5; // matches the user's actual Tradovate ATM template
 const DEFAULT_TARGET_POINTS = 29;
 function computeStopTarget(priceStr: string, action: string): { stopLoss: string; target: string } {
   const p = parseFloat(priceStr);
@@ -2037,7 +2037,12 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
   const [lockingOut, setLockingOut] = useState(false);
   const [stopRules, setStopRules] = useState<StopRule[]>([]);
   const [stopRuleMode, setStopRuleMode] = useState<"oneshot" | "trail">("oneshot");
-  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", triggerOffset: "", newStopOffset: "", trailAmount: "", checkFrequency: "" });
+  // Defaults lifted directly from your own Tradovate ATM template
+  // (Auto Trail: Stop Loss 6.50 / Profit Trigger 7.75 / Frequency 8.75) —
+  // still ordinary editable fields, this just saves retyping the same
+  // three numbers on every single trade.
+  const AUTO_TRAIL_DEFAULTS = { triggerOffset: "7.75", trailAmount: "6.50", checkFrequency: "8.75" };
+  const [stopRuleForm, setStopRuleForm] = useState({ entryPrice: "", newStopOffset: "", ...AUTO_TRAIL_DEFAULTS });
 
   function refreshStopRules() {
     fetch("/api/tradovate/stop-rules").then((r) => r.json()).then(setStopRules);
@@ -2078,7 +2083,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
         checkFrequency: stopRuleMode === "trail" ? stopRuleForm.checkFrequency : undefined,
       }),
     });
-    setStopRuleForm({ entryPrice: "", triggerOffset: "", newStopOffset: "", trailAmount: "", checkFrequency: "" });
+    setStopRuleForm((f) => ({ ...f, entryPrice: "", newStopOffset: "" }));
     refreshStopRules();
   }
 
