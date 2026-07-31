@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Provide either imageBase64 (+ mediaType) or text." }, { status: 400 });
   }
 
-  const instructions = `You are reading an options chain (calls on one side, strikes in the middle, puts on the other — or a similarly laid-out table). Extract EVERY visible strike price along with its call open interest and put open interest. Read the actual numbers precisely — do not estimate, round, or invent values. If a side's OI isn't visible or legible for a given strike, use null for that side rather than guessing.
+  const instructions = `You are reading an options chain (calls on one side, strikes in the middle, puts on the other — or a similarly laid-out table). Extract EVERY visible strike price along with its call open interest and put open interest. Read the actual numbers precisely — do not estimate, round, or invent values. If a side's OI isn't visible or legible for a given strike, use null for that side rather than guessing. If the chain is very wide (many dozens of strikes, or more than one expiry visible at once), it's fine to run long, but the response MUST be complete, valid JSON — never stop partway through a strike entry or leave the array unterminated.
 
 Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or after, in exactly this shape:
 {"strikes": [{"strike": 683, "callOI": 1384, "putOI": 1257}, {"strike": 700, "callOI": 38894, "putOI": 38617}]}`;
@@ -48,7 +48,7 @@ Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or
         },
         body: JSON.stringify({
           model: process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
-          max_tokens: 4096,
+          max_tokens: 8192,
           messages: [{ role: "user", content }],
         }),
         signal: controller.signal,
@@ -64,7 +64,13 @@ Respond with ONLY valid JSON, no markdown fences, no preamble, no text before or
     const apiBody = await res.json();
     const responseText = (apiBody.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
     const cleaned = responseText.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
-    parsed = JSON.parse(cleaned);
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr: any) {
+      console.error(`[PARSE-CHAIN] JSON parse failed (stop_reason=${apiBody.stop_reason}, response length=${responseText.length} chars): ${parseErr.message}`);
+      console.error(`[PARSE-CHAIN] raw response was: ${responseText.slice(0, 2000)}`);
+      throw parseErr;
+    }
   } catch (err: any) {
     console.error("[PARSE-CHAIN] failed:", err.message || err);
     return NextResponse.json({ error: `Couldn't parse the chain: ${err.message || err}` }, { status: 502 });
