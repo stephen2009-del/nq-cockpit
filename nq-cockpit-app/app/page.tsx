@@ -523,6 +523,18 @@ export default function Page() {
     setOiLevels((l) => l.filter((x) => x.id !== id));
   }
 
+  // Called after a bulk chain upload/paste replaces today's Open Interest
+  // Levels server-side (parse-chain deletes-then-recreates for today) —
+  // just swaps the client's copy for whatever the server now actually has,
+  // same pattern as loadAll() but scoped to this one table.
+  function handleLevelsReplaced(newLevels: OILevel[]) {
+    setOiLevels((existing) => {
+      const todayKey = tradingDayKey(new Date());
+      const keepOthers = existing.filter((l) => tradingDayKey(new Date(l.date)) !== todayKey);
+      return [...newLevels, ...keepOthers];
+    });
+  }
+
   const allChecked = rules.length > 0 && rules.every((r) => checked[r.id]);
 
   const todayStr = tradingDayKey(new Date());
@@ -626,6 +638,7 @@ export default function Page() {
           setOiForm={setOiForm}
           onAddOi={addOiLevel}
           onDeleteOi={deleteOiLevel}
+          onLevelsReplaced={handleLevelsReplaced}
         />
       )}
 
@@ -847,6 +860,9 @@ function buildPreMarketPrepHtml(params: {
 }): string {
   const { qqq, mult, move, nqPrice, nqLow, nqHigh, qqqLow, qqqHigh, openInterestNotes, oiLevels, ladderRows } = params;
   const todayLabel = new Date().toDateString();
+  // Top 3 strikes by OI, flagged as "walls" — same computation used
+  // on-screen, so the export matches what you'd see live in the app.
+  const wallStrikes = new Set([...oiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => l.strike));
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
 <title>NQ Cockpit — Pre-Market Prep — ${todayLabel}</title>
@@ -862,6 +878,7 @@ function buildPreMarketPrepHtml(params: {
   .stat .label{color:#7F8CA6;font-size:11px;}
   .stat .value{font-size:19px;font-weight:bold;}
   .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  .wall-row td{background:rgba(229,72,77,0.15);color:#E5484D;font-weight:bold;}
   @media print {
     body{background:#fff;color:#000;}
     h1,h2{color:#000;}
@@ -869,6 +886,7 @@ function buildPreMarketPrepHtml(params: {
     td{border-bottom-color:#eee;}
     .stat .label{color:#666;}
     .anchor-row td{background:#f0f0f0;color:#000;}
+    .wall-row td{background:#fbe4e4;color:#a12020;}
   }
 </style>
 </head>
@@ -898,14 +916,19 @@ function buildPreMarketPrepHtml(params: {
   <h2>Open Interest Levels</h2>
   <table>
     <thead><tr><th>Strike</th><th>OI</th><th>Note</th></tr></thead>
-    <tbody>${oiLevels.map((l) => `<tr><td>${l.strike}</td><td>${l.oi.toLocaleString()}</td><td>${l.note || "\u2014"}</td></tr>`).join("")}</tbody>
+    <tbody>${oiLevels.map((l) => `<tr${wallStrikes.has(l.strike) ? ' class="wall-row"' : ""}><td>${l.strike}${wallStrikes.has(l.strike) ? " \u2190 WALL" : ""}</td><td>${l.oi.toLocaleString()}</td><td>${l.note || "\u2014"}</td></tr>`).join("")}</tbody>
   </table>` : ""}
 
   <h2>QQQ / NQ Price Ladder</h2>
   <table>
     <thead><tr><th>QQQ</th><th>NQ</th></tr></thead>
     <tbody>
-      ${ladderRows.map((row) => `<tr${row.isAnchor ? ' class="anchor-row"' : ""}><td>${row.qqq.toFixed(2)}${row.isAnchor ? " \u2190 today" : ""}</td><td>${row.nq.toFixed(2)}</td></tr>`).join("")}
+      ${ladderRows.map((row) => {
+        const isWall = wallStrikes.has(row.qqq);
+        const cls = row.isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : "";
+        const marker = row.isAnchor ? " \u2190 today" : isWall ? " \u2190 WALL" : "";
+        return `<tr${cls}><td>${row.qqq.toFixed(2)}${marker}</td><td>${row.nq.toFixed(2)}</td></tr>`;
+      }).join("")}
     </tbody>
   </table>
 </body></html>`;
@@ -921,6 +944,7 @@ function PreMarketTab({
   setOiForm,
   onAddOi,
   onDeleteOi,
+  onLevelsReplaced,
 }: {
   form: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string };
   setForm: (f: { qqqPrice: string; multiplier: string; estimatedMove: string; openInterestNotes: string }) => void;
@@ -931,6 +955,7 @@ function PreMarketTab({
   setOiForm: (f: { strike: string; oi: string; note: string }) => void;
   onAddOi: () => void;
   onDeleteOi: (id: number) => void;
+  onLevelsReplaced: (levels: OILevel[]) => void;
 }) {
   const qqq = parseFloat(form.qqqPrice);
   const mult = parseFloat(form.multiplier);
@@ -958,6 +983,50 @@ function PreMarketTab({
     }
   }
 
+  const [chainBusy, setChainBusy] = useState(false);
+  const [chainText, setChainText] = useState("");
+  const [chainMode, setChainMode] = useState<"image" | "text">("image");
+
+  // Today's levels, sorted, top 3 by OI flagged as "walls" — the whole
+  // point of logging 40 strikes is knowing which 2-3 of them actually
+  // matter without having to eyeball a dense screenshot every time.
+  const todayLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
+  const wallStrikes = new Set(
+    [...todayLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => l.strike)
+  );
+
+  async function runChainParse(payload: { imageBase64?: string; mediaType?: string; text?: string }) {
+    setChainBusy(true);
+    try {
+      const res = await fetch("/api/premarket/parse-chain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        alert(body.error || "Couldn't parse the chain.");
+        return;
+      }
+      onLevelsReplaced(body.levels);
+      setChainText("");
+      alert(`Logged ${body.count} strike(s) from the chain. Top 3 by OI are now flagged as walls below.`);
+    } catch (err: any) {
+      alert(`Chain parse failed: ${err.message || err}`);
+    } finally {
+      setChainBusy(false);
+    }
+  }
+
+  function handleChainFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1];
+      runChainParse({ imageBase64: base64, mediaType: file.type || "image/png" });
+    };
+    reader.readAsDataURL(file);
+  }
   return (
     <>
       <div className="panel-box">
@@ -1044,16 +1113,27 @@ function PreMarketTab({
                 <tr><th>QQQ</th><th>NQ</th></tr>
               </thead>
               <tbody>
-                {ladderRows.map((row) => (
-                  <tr key={row.qqq} style={row.isAnchor ? { background: "rgba(245,166,35,0.12)" } : undefined}>
-                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
-                      {row.qqq.toFixed(2)}{row.isAnchor ? "  ← today" : ""}
-                    </td>
-                    <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : undefined}>
-                      {row.nq.toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
+                {ladderRows.map((row) => {
+                  const isWall = wallStrikes.has(row.qqq);
+                  const matchedLevel = !isWall && todayLevels.find((l) => Math.abs(l.strike - row.qqq) < 0.01);
+                  return (
+                    <tr
+                      key={row.qqq}
+                      style={
+                        row.isAnchor ? { background: "rgba(245,166,35,0.12)" } :
+                        isWall ? { background: "rgba(229,72,77,0.12)" } :
+                        matchedLevel ? { background: "rgba(229,72,77,0.05)" } : undefined
+                      }
+                    >
+                      <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
+                        {row.qqq.toFixed(2)}{row.isAnchor ? "  ← today" : isWall ? "  ← WALL" : matchedLevel ? "  ← OI logged" : ""}
+                      </td>
+                      <td style={row.isAnchor ? { color: "var(--amber)", fontWeight: 600 } : isWall ? { color: "var(--red)", fontWeight: 600 } : undefined}>
+                        {row.nq.toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1088,6 +1168,33 @@ function PreMarketTab({
       <div className="panel-box">
         <div className="panel-title">Open Interest Levels</div>
         <div className="panel-desc">Log notable strikes and their OI before the open — useful support/resistance reference for the day.</div>
+
+        <div style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 14, marginBottom: 16, background: "var(--panel-2)" }}>
+          <div className="card-label" style={{ marginBottom: 6 }}>Upload tonight's chain (after 8pm ET, for tomorrow's expiry)</div>
+          <div className="panel-desc" style={{ marginBottom: 8 }}>Upload a screenshot of the option chain, or paste the copied text — every visible strike gets read, logged, and the top 3 by OI get flagged as walls below. Replaces today's levels rather than piling on top.</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button className={`btn small ${chainMode === "image" ? "primary" : "ghost"}`} onClick={() => setChainMode("image")}>Screenshot</button>
+            <button className={`btn small ${chainMode === "text" ? "primary" : "ghost"}`} onClick={() => setChainMode("text")}>Paste Text</button>
+          </div>
+          {chainMode === "image" ? (
+            <input
+              type="file" accept="image/*" disabled={chainBusy}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleChainFile(f); }}
+            />
+          ) : (
+            <>
+              <textarea
+                rows={5} style={{ width: "100%" }} placeholder="Paste the copied chain text here…"
+                value={chainText} onChange={(e) => setChainText(e.target.value)}
+              />
+              <button className="btn small" style={{ marginTop: 8 }} disabled={chainBusy || !chainText.trim()} onClick={() => runChainParse({ text: chainText })}>
+                {chainBusy ? "Reading…" : "Parse & Save"}
+              </button>
+            </>
+          )}
+          {chainBusy && chainMode === "image" && <div className="card-sub" style={{ marginTop: 8 }}>Reading the screenshot…</div>}
+        </div>
+
         <div className="grid3">
           <div className="field"><label>Strike</label>
             <input type="number" step="1" value={oiForm.strike} onChange={(e) => setOiForm({ ...oiForm, strike: e.target.value })} placeholder="e.g. 700" />
@@ -1106,14 +1213,15 @@ function PreMarketTab({
         ) : (
           <div style={{ overflowX: "auto", marginTop: 16 }}>
             <table>
-              <thead><tr><th>Date</th><th>Strike</th><th>OI</th><th>Note</th><th></th></tr></thead>
+              <thead><tr><th>Date</th><th>Strike</th><th>OI</th><th>Note</th><th></th><th></th></tr></thead>
               <tbody>
                 {oiLevels.map((l) => (
-                  <tr key={l.id}>
+                  <tr key={l.id} style={wallStrikes.has(l.strike) ? { background: "rgba(229,72,77,0.1)" } : undefined}>
                     <td>{new Date(l.date).toLocaleDateString()}</td>
-                    <td>{l.strike}</td>
+                    <td style={wallStrikes.has(l.strike) ? { color: "var(--red)", fontWeight: 600 } : undefined}>{l.strike}</td>
                     <td>{l.oi.toLocaleString()}</td>
                     <td>{l.note || "—"}</td>
+                    <td>{wallStrikes.has(l.strike) && <span className="tag" style={{ background: "rgba(229,72,77,0.15)", color: "var(--red)" }}>WALL</span>}</td>
                     <td><button className="btn small ghost" onClick={() => onDeleteOi(l.id)}>Del</button></td>
                   </tr>
                 ))}
@@ -1385,7 +1493,7 @@ function IntradayChart({ checks, todayPrep }: { checks: IntradayCheckT[]; todayP
   );
 }
 
-function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
+function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null, oiLevels: OILevel[] = []) {
   const w = 900, h = 160, pad = 26;
   const data = computeIntradayChartData(checks, todayPrep, w, h, pad);
   const svg = `
@@ -1423,13 +1531,19 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     const highBoundLevel = Math.round(anchor + move);
     const lowBoundLevel = Math.round(anchor - move);
 
+    // Top 3 today's OI levels by OI — same "wall" computation as
+    // Pre-Market Prep, so a strike flagged there shows up here too.
+    const todayOiLevels = oiLevels.filter((l) => tradingDayKey(new Date(l.date)) === tradingDayKey(new Date()));
+    const wallStrikes = new Set([...todayOiLevels].sort((a, b) => b.oi - a.oi).slice(0, 3).map((l) => Math.round(l.strike)));
+
     const rowsFor = (levels: number[]) =>
       levels
         .map((level) => {
           const isAnchor = Math.abs(level - anchor) < 0.5;
+          const isWall = wallStrikes.has(level);
           const isBound = level === highBoundLevel || level === lowBoundLevel;
-          const cls = isAnchor ? ' class="anchor-row"' : isBound ? ' class="bound-row"' : "";
-          const marker = isAnchor ? " \u2190 anchor" : isBound ? " \u2190 \u00b1move" : "";
+          const cls = isAnchor ? ' class="anchor-row"' : isWall ? ' class="wall-row"' : isBound ? ' class="bound-row"' : "";
+          const marker = isAnchor ? " \u2190 anchor" : isWall ? " \u2190 WALL" : isBound ? " \u2190 \u00b1move" : "";
           return `<tr${cls}><td>${level.toFixed(2)}${marker}</td><td>${(level * mult).toFixed(2)}</td></tr>`;
         })
         .join("");
@@ -1458,6 +1572,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
   .col{flex:1;min-width:0;}
   .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
   .bound-row td{background:rgba(229,72,77,0.15);color:#E5484D;font-weight:bold;}
+  .wall-row td{background:rgba(167,139,250,0.18);color:#A78BFA;font-weight:bold;}
   .note{color:#7F8CA6;font-size:10px;margin-top:12px;}
   @media print {
     body{background:#fff;color:#000;padding:0;font-size:10.5px;}
@@ -1467,6 +1582,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     .note{color:#666;}
     .anchor-row td{background:#f0f0f0 !important;color:#000 !important;}
     .bound-row td{background:#fbe4e4 !important;color:#a12020 !important;}
+    .wall-row td{background:#ece5fc !important;color:#5b3fa0 !important;}
     svg{background:#f3f3f3 !important;}
   }
 </style></head>
@@ -1484,8 +1600,8 @@ ${ladderHtml}
   return html;
 }
 
-function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null) {
-  downloadHtmlReport(buildIntradayHtmlReport(checks, todayPrep), `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
+function downloadIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketPrep | null, oiLevels: OILevel[] = []) {
+  downloadHtmlReport(buildIntradayHtmlReport(checks, todayPrep, oiLevels), `nq-cockpit-intraday-${new Date().toISOString().slice(0, 10)}.html`);
 }
 
 const EMO_TAGS = ["Calm", "Confident", "Anxious", "FOMO", "Doubt", "Overconfident", "Tilted / Revenge", "Fear of losing gains", "Impatient", "Bored"];
@@ -1646,8 +1762,8 @@ function IntradayTab({
       <div className="panel-box">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div className="panel-title" style={{ margin: 0 }}>Today's Chart</div>
-          <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep))} disabled={checks.length === 0}>View HTML</button>
-          <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep)} disabled={checks.length === 0}>Download HTML</button>
+          <button className="btn small ghost" onClick={() => viewHtmlReport(buildIntradayHtmlReport(checks, todayPrep, oiLevels))} disabled={checks.length === 0}>View HTML</button>
+          <button className="btn small ghost" onClick={() => downloadIntradayHtmlReport(checks, todayPrep, oiLevels)} disabled={checks.length === 0}>Download HTML</button>
         </div>
         <div className="panel-desc">NQ price at each logged check, against today's estimated move band. Auto-updates from a live QQQ quote every minute during market hours (9:30am–4:00pm ET) — you can still add a manual check any time too.</div>
         <IntradayChart checks={checks} todayPrep={todayPrep} />
