@@ -120,13 +120,15 @@ function roundToTick(price: number, tick: number = 0.25): number {
 // up until submit — this only sets the starting point instead of leaving
 // both blank.
 const DEFAULT_STOP_POINTS = 47.5; // matches the user's actual Tradovate ATM template
-const DEFAULT_TARGET_POINTS = 29;
-function computeStopTarget(priceStr: string, action: string): { stopLoss: string; target: string } {
+// No default target — profit management is handled by the Auto Trail
+// rule instead of a fixed target price, so Target is never auto-filled;
+// it stays a plain, optional, manually-entered field if you ever want one
+// for a specific trade.
+function computeStop(priceStr: string, action: string): { stopLoss: string } {
   const p = parseFloat(priceStr);
-  if (isNaN(p)) return { stopLoss: "", target: "" };
+  if (isNaN(p)) return { stopLoss: "" };
   const stop = action === "Sell" ? p + DEFAULT_STOP_POINTS : p - DEFAULT_STOP_POINTS;
-  const tgt = action === "Sell" ? p - DEFAULT_TARGET_POINTS : p + DEFAULT_TARGET_POINTS;
-  return { stopLoss: String(roundToTick(stop)), target: String(roundToTick(tgt)) };
+  return { stopLoss: String(roundToTick(stop)) };
 }
 
 function addMinutesLabel(hhmm: string, deltaMinutes: number): string {
@@ -1984,7 +1986,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
   useEffect(() => {
     if (form.orderType === "Limit" && !form.price && lastKnownPriceIsFresh && lastKnownPrice !== null) {
       const rounded = String(roundToTick(lastKnownPrice));
-      setForm((f) => (f.price ? f : { ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+      setForm((f) => (f.price ? f : { ...f, price: rounded, ...computeStop(rounded, f.action) }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastKnownPrice, lastKnownPriceIsFresh]);
@@ -2190,7 +2192,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
   function useLimitOrder() {
     setForm((f) => {
       const price = lastKnownPriceIsFresh && lastKnownPrice !== null ? String(roundToTick(lastKnownPrice)) : f.price;
-      return { ...f, orderType: "Limit", price, ...computeStopTarget(price, f.action) };
+      return { ...f, orderType: "Limit", price, ...computeStop(price, f.action) };
     });
   }
 
@@ -2281,6 +2283,15 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
         setResult({ type: "error", message: JSON.stringify(data.error) });
       } else {
         setResult({ type: "success", message: `Order submitted (${settings.tradovateEnv}). Tradovate order ID: ${data.result?.orderId ?? "pending"}` });
+        // The Stop Management section below asks for "Entry Price" as a
+        // separate field, but for a Limit order the app already knows
+        // exactly what price was just submitted — no reason to make you
+        // retype a number it already has. Market orders are left blank
+        // here since the actual fill price isn't known synchronously from
+        // this response.
+        if (form.orderType === "Limit" && form.price) {
+          setStopRuleForm((f) => ({ ...f, entryPrice: String(roundToTick(parseFloat(form.price))) }));
+        }
       }
       fetch("/api/tradovate/order").then((r) => r.json()).then(setLogs);
       setTimeout(refreshPositions, 2000);
@@ -2357,7 +2368,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
                 setForm((f) => ({
                   ...f,
                   action: newAction,
-                  ...(f.orderType === "Limit" && f.price ? computeStopTarget(f.price, newAction) : {}),
+                  ...(f.orderType === "Limit" && f.price ? computeStop(f.price, newAction) : {}),
                 }));
               }}
             >
@@ -2390,7 +2401,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
                     ...f,
                     orderType: newType,
                     price,
-                    ...(newType === "Limit" && price && !f.stopLoss && !f.target ? computeStopTarget(price, f.action) : {}),
+                    ...(newType === "Limit" && price && !f.stopLoss ? computeStop(price, f.action) : {}),
                   };
                 });
               }}
@@ -2408,7 +2419,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
                   const v = parseFloat(e.target.value);
                   if (!isNaN(v)) {
                     const rounded = String(roundToTick(v));
-                    setForm((f) => ({ ...f, price: rounded, ...computeStopTarget(rounded, f.action) }));
+                    setForm((f) => ({ ...f, price: rounded, ...computeStop(rounded, f.action) }));
                   }
                 }}
               />
