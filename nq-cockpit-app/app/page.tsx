@@ -1405,6 +1405,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
   if (todayPrep) {
     const anchor = todayPrep.qqqPrice;
     const mult = todayPrep.multiplier;
+    const move = todayPrep.estimatedMove;
     const RANGE = 20;
     const start = Math.floor(anchor - RANGE);
     const end = Math.ceil(anchor + RANGE);
@@ -1414,11 +1415,22 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     const leftLevels = allLevels.slice(0, mid);
     const rightLevels = allLevels.slice(mid);
 
+    // The estimated-move boundary itself is very likely a fractional QQQ
+    // value, but the ladder only has whole-point rows — so highlight
+    // whichever whole-point row sits closest to anchor+move and
+    // anchor-move, same red used for Est. High/Low on the chart above,
+    // so the two visuals read as the same thing.
+    const highBoundLevel = Math.round(anchor + move);
+    const lowBoundLevel = Math.round(anchor - move);
+
     const rowsFor = (levels: number[]) =>
       levels
         .map((level) => {
           const isAnchor = Math.abs(level - anchor) < 0.5;
-          return `<tr${isAnchor ? ' class="anchor-row"' : ""}><td>${level.toFixed(2)}${isAnchor ? " \u2190 anchor" : ""}</td><td>${(level * mult).toFixed(2)}</td></tr>`;
+          const isBound = level === highBoundLevel || level === lowBoundLevel;
+          const cls = isAnchor ? ' class="anchor-row"' : isBound ? ' class="bound-row"' : "";
+          const marker = isAnchor ? " \u2190 anchor" : isBound ? " \u2190 \u00b1move" : "";
+          return `<tr${cls}><td>${level.toFixed(2)}${marker}</td><td>${(level * mult).toFixed(2)}</td></tr>`;
         })
         .join("");
 
@@ -1445,6 +1457,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
   .cols{display:flex;gap:24px;margin-top:12px;}
   .col{flex:1;min-width:0;}
   .anchor-row td{background:rgba(245,166,35,0.15);color:#F5A623;font-weight:bold;}
+  .bound-row td{background:rgba(229,72,77,0.15);color:#E5484D;font-weight:bold;}
   .note{color:#7F8CA6;font-size:10px;margin-top:12px;}
   @media print {
     body{background:#fff;color:#000;padding:0;font-size:10.5px;}
@@ -1453,6 +1466,7 @@ function buildIntradayHtmlReport(checks: IntradayCheckT[], todayPrep: PreMarketP
     td{border-bottom-color:#eee;}
     .note{color:#666;}
     .anchor-row td{background:#f0f0f0 !important;color:#000 !important;}
+    .bound-row td{background:#fbe4e4 !important;color:#a12020 !important;}
     svg{background:#f3f3f3 !important;}
   }
 </style></head>
