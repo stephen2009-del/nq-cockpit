@@ -1944,11 +1944,9 @@ type OrderLog = {
 
 function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trade[] }) {
   function computeWindowStatus() {
-    const raw = getTradingWindowStatus(settings);
-    if (settings.tradovateEnv !== "live") {
-      return { allowed: true, reason: "Demo — Trading Window Guard not enforced (Live only).", etLabel: raw.etLabel };
-    }
-    return raw;
+    // Now enforced on both Demo and Live — see the matching server-side
+    // guard in the order route for why the Demo exemption was removed.
+    return getTradingWindowStatus(settings);
   }
   const [windowStatus, setWindowStatus] = useState(computeWindowStatus);
 
@@ -2310,7 +2308,7 @@ function TradeTicketTab({ settings, trades }: { settings: Settings; trades: Trad
       <div className="panel-box">
         <div className="panel-title">Trade Ticket — {settings.tradovateEnv.toUpperCase()}</div>
         <div className="panel-desc">
-          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position — checked using Tradovate's own P&L data when available, otherwise requiring an Intraday check logged within the last 10 minutes. No fresh check, no Tradovate data — the add is blocked outright. The Trading Window Guard (time-of-day/weekday restriction) only applies to your Live account — Demo is unrestricted by time, for free testing.
+          Orders placed here go through Tradovate's API and are blocked if they'd add to an open losing position — checked using Tradovate's own P&L data when available, otherwise requiring an Intraday check logged within the last 10 minutes. No fresh check, no Tradovate data — the add is blocked outright. The Trading Window Guard (time-of-day/weekday restriction) applies to both Demo and Live.
           {settings.tradovateEnv === "live" && (
             <span style={{ color: "var(--red)", fontWeight: 600 }}> LIVE environment — real orders, real money.</span>
           )}
@@ -3841,7 +3839,7 @@ function SettingsPanel({ settings, onSave }: { settings: Settings; onSave: (s: S
 
       <div className="panel-box">
         <div className="panel-title">Trading Window Guard</div>
-        <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window — <b>Live account only</b>. Demo is unrestricted by time. All times are Eastern (ET), matching CME hours.</div>
+        <div className="panel-desc">Orders placed through the Trade Ticket tab are blocked outside this window — <b>both Demo and Live</b>. All times are Eastern (ET), matching CME hours.</div>
         {local.tradingWindowLocked && (
           <div className="status-banner status-warn" style={{ borderColor: "var(--red)", color: "var(--red)", background: "rgba(229,72,77,0.1)", marginBottom: 12 }}>
             🔒 These settings are locked and cannot be changed. There is no unlock option — this was a deliberate choice when you locked them.

@@ -47,10 +47,10 @@ model Settings {
   dailyLossLimit       Float  @default(500)
   contract             String @default("NQ")
   multiplier           Float  @default(20)
-  tradingWindowStart   String @default("09:30")
-  tradingWindowEnd     String @default("16:00")
-  cutoffMinutesBeforeClose Int @default(65)
-  openingBufferMinutes Int    @default(10)
+  tradingWindowStart   String @default("10:05")
+  tradingWindowEnd     String @default("14:55")
+  cutoffMinutesBeforeClose Int @default(0)
+  openingBufferMinutes Int    @default(0)
   tradovateEnv         String @default("demo")
   tradingWindowLocked  Boolean @default(false)
   // Pins a specific account per environment, for when more than one exists
@@ -162,6 +162,12 @@ model StopManagementRule {
   checkFrequency   Float?
   lastRatchetPrice Float?
   ratchetCount     Int     @default(0)
+  // Distinguishes "this order hasn't filled yet" (no position found, but
+  // never had one either — keep waiting) from "the position closed"
+  // (had a position, now it's gone — actually done). Without this, a
+  // resting Limit order that simply hasn't filled yet gets misread as an
+  // already-closed position on the very first check.
+  everSeenOpen     Boolean @default(false)
   status         String    @default("active") // active | triggered | failed | cancelled
   triggeredAt    DateTime?
   newStopPrice   Float?

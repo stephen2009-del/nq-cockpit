@@ -30,17 +30,26 @@ export async function checkStopRules(): Promise<{ checked: number; results: any[
       // as the "no adding to losers" guard.
       const position = await findOpenPosition(env, rule.accountId, rule.symbol);
       if (!position) {
-        // For a trail rule, a closed position means the trail's job is
-        // done (or the position was closed some other way) — stop
-        // checking it rather than leaving it "active" forever.
-        if (rule.mode === "trail") {
+        // Two very different situations look identical here: a resting
+        // Limit order that simply hasn't filled yet (never had a
+        // position — keep waiting, don't give up), vs. a position that
+        // WAS open and has since closed (genuinely done, stop checking).
+        // everSeenOpen is what tells them apart.
+        if (rule.mode === "trail" && rule.everSeenOpen) {
           await prisma.stopManagementRule.update({
             where: { id: rule.id },
             data: { status: "cancelled", detail: "Position closed — trail stopped checking." },
           });
+          results.push({ ruleId: rule.id, skipped: "position closed, rule cancelled" });
+        } else {
+          results.push({ ruleId: rule.id, skipped: "no open position yet — order may still be resting/unfilled, will keep checking" });
         }
-        results.push({ ruleId: rule.id, skipped: "no open position found" });
         continue;
+      }
+
+      if (!rule.everSeenOpen) {
+        await prisma.stopManagementRule.update({ where: { id: rule.id }, data: { everSeenOpen: true } });
+        rule.everSeenOpen = true;
       }
 
       let directPnl = extractPositionPnl(position);
