@@ -281,6 +281,28 @@ export default function Page() {
     return () => clearInterval(interval);
   }, []);
 
+  // The server now auto-syncs Tradovate fills into Trade records every
+  // 60s in the background (replacing the manual "Sync to Journal"
+  // click) — but that only helps if the client actually re-fetches the
+  // trades list afterward. Merges by id rather than replacing outright,
+  // so this doesn't clobber a trade the user just manually logged in
+  // this same tab moments before the poll runs.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch("/api/trades")
+        .then((r) => r.json())
+        .then((fresh: Trade[]) => {
+          setTrades((current) => {
+            const currentIds = new Set(current.map((t) => t.id));
+            const onlyNew = fresh.filter((t) => !currentIds.has(t.id));
+            return onlyNew.length ? [...current, ...onlyNew] : current;
+          });
+        })
+        .catch(() => {});
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     if (form.entry && form.exit) {
       const entry = parseFloat(form.entry), exit = parseFloat(form.exit), size = parseFloat(form.size) || 1;
@@ -3279,6 +3301,7 @@ function TVAnalyticsTab({ settings, trades, onTradeSynced, onTradeUpdated }: { s
       {data && (
         <>
           <div className="panel-box">
+            <div className="card-sub" style={{ marginBottom: 8 }}>Fills now sync to the Journal automatically in the background every ~60 seconds — this button is just for forcing it immediately rather than waiting.</div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
               <div className="panel-title" style={{ margin: 0 }}>Account Summary</div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

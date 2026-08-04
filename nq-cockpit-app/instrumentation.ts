@@ -78,4 +78,19 @@ export async function register() {
   }, 60_000);
 
   console.log("Stop-rule (Automatic Stop Management / Auto Trail) scheduler started (every 60s).");
+
+  // Fifth poller: automatically pulls Tradovate fills and FIFO-matches
+  // them into Trade records — replacing the manual "Sync to Journal"
+  // click on the TV Analytics tab, which was an easy step to forget and
+  // meant reports/analysis silently had nothing to show for a day's real
+  // trading until someone remembered to click it.
+  const { autoSyncTrades } = await import("@/lib/autoSync");
+
+  setInterval(() => {
+    autoSyncTrades().catch((err) => {
+      console.error("Auto-sync scheduler tick failed:", err?.message || err);
+    });
+  }, 60_000);
+
+  console.log("Trade auto-sync scheduler started (every 60s, both Demo and Live).");
 }
